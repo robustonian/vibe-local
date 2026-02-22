@@ -35,7 +35,7 @@ VIBE_LOCAL_DEBUG=0
 # [C1 fix] source ではなく grep + cut で既知キーのみ安全に読む
 # cut is safer than sed for values containing special characters
 if [ -f "$CONFIG_FILE" ]; then
-    _val() { grep -E "^${1}=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"']//;s/[\"']$//" || true; }
+    _val() { grep -E "^${1}=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"']//;s/[\"']$//;s/[[:space:]]*#.*//" || true; }
     _m="$(_val MODEL)"
     _s="$(_val SIDECAR_MODEL)"
     _h="$(_val OLLAMA_HOST)"
@@ -73,6 +73,15 @@ fi
 ensure_ollama() {
     if curl -s --max-time 2 "$OLLAMA_HOST/api/tags" &>/dev/null; then
         return 0
+    fi
+
+    if ! command -v ollama &>/dev/null; then
+        echo "❌ エラー: ollama コマンドが見つかりません"
+        echo ""
+        echo "インストール方法:"
+        echo "  macOS: brew install ollama  または  https://ollama.com/download"
+        echo "  Linux: curl -fsSL https://ollama.com/install.sh | sh"
+        return 1
     fi
 
     echo "🦙 ollama を起動中..."
@@ -170,18 +179,14 @@ fi
 # モデルがロード済みか確認 (モデルが指定されている場合のみ)
 # Use Python JSON parsing for exact model matching (grep -qF can match partial names)
 if [ -n "$MODEL" ]; then
-    MODEL_FOUND=$(curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | python3 -c "
-import sys, json
+    if ! curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | python3 -c "
+import sys,json
 try:
-    data = json.load(sys.stdin)
-    names = [m['name'] for m in data.get('models', [])]
-    target = '$MODEL'
-    # Exact match or match without tag suffix
-    found = any(target == n or target == n.split(':')[0] or n.startswith(target + ':') for n in names)
-    print('yes' if found else 'no')
-except: print('error')
-" 2>/dev/null || echo "error")
-    if [ "$MODEL_FOUND" = "no" ]; then
+    d=json.load(sys.stdin)
+    names=[m['name'] for m in d.get('models',[])]
+    sys.exit(0 if '$MODEL' in names or '$MODEL:latest' in names else 1)
+except: sys.exit(1)
+" 2>/dev/null; then
         echo "❌ エラー: モデル $MODEL が見つかりません"
         echo ""
         echo "対処法:"
@@ -225,7 +230,7 @@ else
     echo "--------------------------------------------"
     echo ""
     printf " 続行しますか？ / Continue? [y/N]: "
-    read -r REPLY </dev/tty 2>/dev/null || read -r REPLY 2>/dev/null || REPLY="n"
+    read -r -t 30 REPLY </dev/tty 2>/dev/null || read -r -t 30 REPLY 2>/dev/null || REPLY="n"
     echo ""
 
     case "$REPLY" in
@@ -261,6 +266,7 @@ echo ""
 OLLAMA_HOST="$OLLAMA_HOST" \
 VIBE_LOCAL_MODEL="${MODEL:-}" \
 VIBE_LOCAL_SIDECAR_MODEL="${SIDECAR_MODEL:-}" \
+VIBE_LOCAL_DEBUG="${VIBE_LOCAL_DEBUG:-0}" \
 exec python3 "$VIBE_CODER_SCRIPT" \
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
     ${PERM_ARGS[@]+"${PERM_ARGS[@]}"} \

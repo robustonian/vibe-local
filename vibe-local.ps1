@@ -78,16 +78,16 @@ if (-not (Test-Path $VibeCoderScript)) {
 # --- Find Python command ---
 function Find-Python {
     try {
-        $null = & py -3 --version 2>&1
-        if ($LASTEXITCODE -eq 0) { return "py -3" }
+        $ver = & py -3 --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and "$ver" -match "Python 3") { return "py -3" }
     } catch {}
     try {
-        $null = & python3 --version 2>&1
-        if ($LASTEXITCODE -eq 0) { return "python3" }
+        $ver = & python3 --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and "$ver" -match "Python 3") { return "python3" }
     } catch {}
     try {
-        $null = & python --version 2>&1
-        if ($LASTEXITCODE -eq 0) { return "python" }
+        $ver = & python --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and "$ver" -match "Python 3") { return "python" }
     } catch {}
     return $null
 }
