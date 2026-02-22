@@ -402,7 +402,8 @@ vaporwave_progress() {
 #   → ログは $SPINNER_LOG に保存 (デバッグ用)
 #   → 戻り値: コマンドの終了コード
 
-SPINNER_LOG="/tmp/vibe-local-install-$$.log"
+# [SEC] Use mktemp for unpredictable temp file path (avoid symlink attacks)
+SPINNER_LOG="$(mktemp /tmp/vibe-local-install-XXXXXX.log 2>/dev/null || echo "/tmp/vibe-local-install-$RANDOM-$$.log")"
 
 run_with_spinner() {
     local label="$1"

@@ -57,6 +57,19 @@ if (Test-Path $ConfigFile) {
 if ($Model) { $CfgModel = $Model }
 if ($Debug) { $VibeLocalDebug = 1 }
 
+# [SEC] Validate OLLAMA_HOST - only allow localhost (SSRF prevention)
+$ollamaUri = [System.Uri]::new($OllamaHost)
+if ($ollamaUri.Host -notin @("localhost", "127.0.0.1", "::1", "[::1]")) {
+    Write-Host "Warning: OLLAMA_HOST '$($ollamaUri.Host)' is not localhost. Resetting to localhost for security." -ForegroundColor Yellow
+    $OllamaHost = "http://localhost:11434"
+}
+
+# [SEC] Validate PROXY_PORT is numeric and in range
+if ($ProxyPort -lt 1024 -or $ProxyPort -gt 65535) {
+    Write-Host "Warning: PROXY_PORT $ProxyPort is out of range (1024-65535). Resetting to 8082." -ForegroundColor Yellow
+    $ProxyPort = 8082
+}
+
 # --- RAM detection & model auto-select ---
 try {
     $TotalMem = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
@@ -384,4 +397,11 @@ try {
 }
 finally {
     Cleanup-Proxy
+    # [SEC] Clean up environment variables set during this session
+    Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:VIBE_LOCAL_DEBUG -ErrorAction SilentlyContinue
+    Remove-Item Env:OLLAMA_HOST -ErrorAction SilentlyContinue
+    Remove-Item Env:VIBE_LOCAL_MODEL -ErrorAction SilentlyContinue
+    Remove-Item Env:VIBE_LOCAL_SIDECAR_MODEL -ErrorAction SilentlyContinue
 }

@@ -29,6 +29,21 @@ print("[proxy] === PROXY MODULE LOADED (with WebSearch interception) ===", file=
 OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 PROXY_PORT = int(os.environ.get("VIBE_LOCAL_PROXY_PORT", "8082"))
 
+# [SEC] Validate OLLAMA_HOST to prevent SSRF - only allow localhost targets
+def _validate_ollama_host(url):
+    """Ensure OLLAMA_HOST points to localhost only (SSRF prevention)."""
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname or ""
+    allowed = {"localhost", "127.0.0.1", "::1", "[::1]"}
+    if hostname not in allowed:
+        print(f"[proxy] SECURITY: OLLAMA_HOST '{hostname}' is not localhost. "
+              f"Only localhost/127.0.0.1/::1 are allowed.", file=sys.stderr)
+        print(f"[proxy] SECURITY: Falling back to http://localhost:11434", file=sys.stderr)
+        return "http://localhost:11434"
+    return url
+
+OLLAMA_BASE = _validate_ollama_host(OLLAMA_BASE)
+
 # --- Model routing ---
 # Map Claude model patterns to local Ollama models
 # Main model: for full coding tasks (tool use, long context)
@@ -177,13 +192,21 @@ ALLOWED_TOOLS = {
 # ALLOWED_TOOLS = None
 
 
+def _open_private(path, mode="w"):
+    """Open a file with restricted permissions (owner-only on Unix)."""
+    if os.name != "nt":
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        return os.fdopen(fd, mode)
+    return open(path, mode)
+
+
 def _log(tag, data, req_id=None):
     """Write metadata log (always active). Uses session directory with optional req_id prefix."""
     ts = datetime.datetime.now().strftime("%H%M%S")
     prefix = f"{req_id:04d}_{ts}" if req_id else ts
     path = os.path.join(SESSION_DIR, f"{prefix}_{tag}.json")
     try:
-        with open(path, "w") as f:
+        with _open_private(path) as f:
             if isinstance(data, (dict, list)):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             else:
@@ -200,7 +223,7 @@ def _debug_log(req_id, tag, data):
     ts = datetime.datetime.now().strftime("%H%M%S")
     path = os.path.join(SESSION_DIR, f"{req_id:04d}_{ts}_{tag}.json")
     try:
-        with open(path, "w") as f:
+        with _open_private(path) as f:
             if isinstance(data, (dict, list)):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             else:
@@ -231,7 +254,7 @@ def _save_replay(req_id, req, proxy_port):
     body_filename = f"{req_id:04d}_{ts}_replay_body.json"
     body_path = os.path.join(SESSION_DIR, body_filename)
     try:
-        with open(body_path, "w") as f:
+        with _open_private(body_path) as f:
             json.dump(req, f, ensure_ascii=False, indent=2)
     except Exception:
         return
@@ -239,7 +262,7 @@ def _save_replay(req_id, req, proxy_port):
     # Save curl script
     script_path = os.path.join(SESSION_DIR, f"{req_id:04d}_{ts}_replay.sh")
     try:
-        with open(script_path, "w") as f:
+        with _open_private(script_path) as f:
             f.write(f"""#!/bin/bash
 # Replay request #{req_id:04d}
 curl -X POST \\
@@ -459,8 +482,11 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(resp.read())
                 self._respond(200, data)
             except Exception as e:
-                self._respond(502, {"error": str(e)})
+                # [SEC] Log full error internally, return generic message
+                print(f"[proxy] /v1/models error: {e}", file=sys.stderr)
+                self._respond(502, {"error": "failed to fetch models from ollama"})
         else:
+            # [SEC] Don't reflect user-supplied path in response (XSS prevention)
             self._respond(404, {"error": "not found"})
 
     # Max request body size (50 MB) to prevent abuse
@@ -488,7 +514,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/v1/messages/count_tokens":
             self._handle_count_tokens(req)
         else:
-            self._respond(404, {"error": f"unknown path: {self.path}"})
+            # [SEC] Don't reflect user-supplied path in response
+            self._respond(404, {"error": "unknown endpoint"})
 
     def _handle_web_search(self, req, req_id, t_start):
         """Handle WebSearch sidecar call: search DuckDuckGo, return results
@@ -1014,17 +1041,20 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         except urllib.error.URLError as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
             _debug_summary(req_id, model, len(messages), "sync", elapsed_ms, False)
+            # [SEC] Log full error internally, return generic message to client
+            print(f"[proxy] URLError: {e}", file=sys.stderr)
             self._respond(502, {
                 "type": "error",
-                "error": {"type": "api_error", "message": f"ollama connection failed: {e}"},
+                "error": {"type": "api_error", "message": "ollama connection failed"},
             })
         except Exception as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
             _debug_summary(req_id, model, len(messages), "sync", elapsed_ms, False)
             traceback.print_exc()
+            # [SEC] Don't leak internal error details to client
             self._respond(500, {
                 "type": "error",
-                "error": {"type": "api_error", "message": str(e)},
+                "error": {"type": "api_error", "message": "internal proxy error"},
             })
 
     def _process_ollama_response(self, oai_resp, current_tool_names=None):

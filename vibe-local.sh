@@ -49,6 +49,30 @@ if [ -f "$CONFIG_FILE" ]; then
     unset _val _m _s _p _h _d
 fi
 
+# [SEC] Validate OLLAMA_HOST - only allow localhost (SSRF prevention)
+case "$OLLAMA_HOST" in
+    http://localhost:*|http://127.0.0.1:*|http://\[::1\]:*)
+        ;; # allowed
+    *)
+        echo "⚠️  OLLAMA_HOST='$OLLAMA_HOST' はlocalhostではありません。セキュリティのためlocalhostにリセットします。"
+        OLLAMA_HOST="http://localhost:11434"
+        ;;
+esac
+
+# [SEC] Validate PROXY_PORT is numeric (1024-65535)
+case "$PROXY_PORT" in
+    ''|*[!0-9]*)
+        echo "⚠️  PROXY_PORT='$PROXY_PORT' が不正です。デフォルト8082にリセットします。"
+        PROXY_PORT=8082
+        ;;
+    *)
+        if [ "$PROXY_PORT" -lt 1024 ] || [ "$PROXY_PORT" -gt 65535 ]; then
+            echo "⚠️  PROXY_PORT=$PROXY_PORT は範囲外です (1024-65535)。デフォルト8082にリセットします。"
+            PROXY_PORT=8082
+        fi
+        ;;
+esac
+
 # RAM 検出 (モデルまたはサイドカーの自動判定に使用)
 if [[ "$(uname)" == "Darwin" ]]; then
     RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))

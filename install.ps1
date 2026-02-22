@@ -478,7 +478,14 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
     Vapor-Info "Claude Code CLI $(msg 'installing')"
     try {
         # Official Claude Code installer for Windows
-        Invoke-Expression "& { $(Invoke-RestMethod https://claude.ai/install.ps1) }" 2>&1 | Out-Null
+        # [SEC] Download to temp file first, then execute (avoid Invoke-Expression on remote content)
+        $ccInstaller = Join-Path $env:TEMP "claude-code-install-$(Get-Random).ps1"
+        try {
+            Invoke-WebRequest -Uri "https://claude.ai/install.ps1" -OutFile $ccInstaller -ErrorAction Stop
+            & $ccInstaller 2>&1 | Out-Null
+        } finally {
+            Remove-Item $ccInstaller -Force -ErrorAction SilentlyContinue
+        }
         Vapor-Success "Claude Code CLI $(msg 'install_done')"
     } catch {
         # Fallback to npm
