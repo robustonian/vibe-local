@@ -28,6 +28,7 @@ PROXY_SCRIPT="${PROXY_LIB_DIR}/anthropic-ollama-proxy.py"
 
 # デフォルト値
 MODEL=""
+SIDECAR_MODEL=""
 OLLAMA_HOST="http://localhost:11434"
 PROXY_PORT=8082
 VIBE_LOCAL_DEBUG=0
@@ -36,24 +37,27 @@ VIBE_LOCAL_DEBUG=0
 if [ -f "$CONFIG_FILE" ]; then
     _val() { grep -E "^${1}=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed "s/^${1}=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}/\1/" || true; }
     _m="$(_val MODEL)"
+    _s="$(_val SIDECAR_MODEL)"
     _p="$(_val PROXY_PORT)"
     _h="$(_val OLLAMA_HOST)"
     _d="$(_val VIBE_LOCAL_DEBUG)"
     [ -n "$_m" ] && MODEL="$_m"
+    [ -n "$_s" ] && SIDECAR_MODEL="$_s"
     [ -n "$_p" ] && PROXY_PORT="$_p"
     [ -n "$_h" ] && OLLAMA_HOST="$_h"
     [ -n "$_d" ] && VIBE_LOCAL_DEBUG="$_d"
-    unset _val _m _p _h _d
+    unset _val _m _s _p _h _d
 fi
 
-# config が無い場合、RAM からモデルを自動判定
-if [ -z "$MODEL" ]; then
-    if [[ "$(uname)" == "Darwin" ]]; then
-        RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
-    else
-        RAM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1048576 ))
-    fi
+# RAM 検出 (モデルまたはサイドカーの自動判定に使用)
+if [[ "$(uname)" == "Darwin" ]]; then
+    RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+else
+    RAM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1048576 ))
+fi
 
+# config が無い場合、RAM からメインモデルを自動判定
+if [ -z "$MODEL" ]; then
     if [ "$RAM_GB" -ge 32 ]; then
         MODEL="qwen3-coder:30b"
     elif [ "$RAM_GB" -ge 16 ]; then
@@ -64,6 +68,16 @@ if [ -z "$MODEL" ]; then
         echo "エラー: メモリが不足しています (${RAM_GB}GB)。最低8GB必要です。"
         exit 1
     fi
+fi
+
+# サイドカーモデル自動判定 (config に無い場合、RAM から選択)
+if [ -z "$SIDECAR_MODEL" ]; then
+    if [ "$RAM_GB" -ge 32 ]; then
+        SIDECAR_MODEL="qwen3:8b"
+    elif [ "$RAM_GB" -ge 16 ]; then
+        SIDECAR_MODEL="qwen3:1.7b"
+    fi
+    # 8GB未満: サイドカー無し (メインモデルのみ)
 fi
 
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
@@ -142,14 +156,18 @@ ensure_proxy() {
     echo "🔄 Anthropic→Ollama 変換プロキシを起動中 (port: $PROXY_PORT)..."
 
     # プロキシスクリプトが有効な Python かチェック
-    if ! python3 -c "import ast; ast.parse(open('$PROXY_SCRIPT').read())" 2>/dev/null; then
+    if ! python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$PROXY_SCRIPT" 2>/dev/null; then
         echo "❌ エラー: プロキシスクリプトが壊れています"
         echo "  再インストール: curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash"
         return 1
     fi
 
-    # プロキシ起動
-    VIBE_LOCAL_DEBUG="$VIBE_LOCAL_DEBUG" python3 "$PROXY_SCRIPT" "$PROXY_PORT" &>"$PROXY_LOG" &
+    # プロキシ起動 (環境変数でモデル設定を渡す)
+    OLLAMA_HOST="$OLLAMA_HOST" \
+    VIBE_LOCAL_MODEL="$MODEL" \
+    VIBE_LOCAL_SIDECAR_MODEL="${SIDECAR_MODEL:-$MODEL}" \
+    VIBE_LOCAL_DEBUG="$VIBE_LOCAL_DEBUG" \
+    python3 "$PROXY_SCRIPT" "$PROXY_PORT" &>"$PROXY_LOG" &
     local pid=$!
     echo "$pid" > "$PROXY_PID_FILE"
 
@@ -217,6 +235,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --model)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --model requires an argument"
+                exit 1
+            fi
             MODEL="$2"
             shift 2
             ;;
@@ -253,11 +275,11 @@ if ! ensure_ollama; then
 fi
 
 # モデルがロード済みか確認
-if ! curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -q "$MODEL"; then
+if ! curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -qF "$MODEL"; then
     echo "❌ エラー: モデル $MODEL が見つかりません"
     echo ""
     echo "対処法:"
-    echo "  ollama pull $MODEL"
+    echo "  ollama pull \"$MODEL\""
     echo ""
     echo "利用可能なモデル:"
     curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | python3 -c "
@@ -333,10 +355,12 @@ if [ "$VIBE_LOCAL_DEBUG" -eq 1 ]; then
     DEBUG_LABEL="ON (full request/response logging)"
 fi
 
+SIDECAR_LABEL="${SIDECAR_MODEL:-none}"
 echo ""
 echo "============================================"
 echo " 🤖 vibe-local"
 echo " Model: $MODEL"
+echo " Sidecar: $SIDECAR_LABEL"
 echo " Proxy: $PROXY_URL → $OLLAMA_HOST"
 echo " Permissions: $PERM_LABEL"
 echo " Debug: $DEBUG_LABEL"

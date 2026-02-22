@@ -19,8 +19,40 @@ import re
 import traceback
 import shutil
 
-OLLAMA_BASE = "http://localhost:11434"
-PROXY_PORT = 8082
+OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+PROXY_PORT = int(os.environ.get("VIBE_LOCAL_PROXY_PORT", "8082"))
+
+# --- Model routing ---
+# Map Claude model patterns to local Ollama models
+# Main model: for full coding tasks (tool use, long context)
+MAIN_MODEL = os.environ.get("VIBE_LOCAL_MODEL", "qwen3-coder:30b")
+# Sidecar model: for lightweight tasks (permission checks, summaries, init probes)
+SIDECAR_MODEL = os.environ.get("VIBE_LOCAL_SIDECAR_MODEL", "qwen3:8b")
+
+# Model routing rules: (pattern_substring -> ollama_model)
+# Checked in order; first match wins. Default: MAIN_MODEL.
+MODEL_ROUTES = [
+    ("haiku", SIDECAR_MODEL),        # claude-haiku-* -> fast local
+    ("flash", SIDECAR_MODEL),        # gemini-flash style -> fast local
+    ("mini", SIDECAR_MODEL),         # gpt-4o-mini style -> fast local
+]
+
+
+def _resolve_model(requested_model, has_tools=False, message_count=0, max_tokens=4096):
+    """Route a Claude/API model name to a local Ollama model.
+    Lightweight requests (no tools, few messages, low max_tokens) use sidecar."""
+    # Check explicit model routes first
+    req_lower = requested_model.lower()
+    for pattern, target in MODEL_ROUTES:
+        if pattern in req_lower:
+            return target, True  # (model, is_sidecar)
+
+    # Heuristic: init probes (max_tokens==1, no tools, 0-1 messages) -> sidecar
+    if max_tokens == 1 and not has_tools and message_count <= 1:
+        return SIDECAR_MODEL, True
+
+    # Default: main model for everything else
+    return MAIN_MODEL, False
 # [H3/L4 fix] Log to user-private directory with restricted permissions
 LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "state", "vibe-local", "proxy-debug")
 os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
@@ -46,10 +78,57 @@ def _next_request_id():
 
 # === Optimization settings for local LLM ===
 # Max tokens cap (Claude Code sends 32000 which is way too much for 30B model)
-MAX_TOKENS_CAP = 4096
+MAX_TOKENS_CAP = 8192
+# Sidecar model max tokens (permission checks etc. need very short responses)
+SIDECAR_MAX_TOKENS = 1024
+# Sidecar timeout (seconds) - shorter since these should be fast
+SIDECAR_TIMEOUT = 60
 
 # System prompt max length (chars). Claude Code sends ~15K which overwhelms 30B models.
 SYSTEM_PROMPT_MAX_CHARS = 4000
+
+# Curated local model system prompt (replaces truncated Claude Code system prompt)
+LOCAL_SYSTEM_PROMPT = """You are a coding assistant running on a local LLM via Ollama.
+You help users with software engineering tasks: writing code, debugging, refactoring, and explaining code.
+
+CRITICAL RULES:
+- When the user asks you to do something, USE TOOLS immediately. Do NOT just explain what to do.
+- ALWAYS use function calls for actions. NEVER write tool calls as XML or plain text.
+- If you need to run a command, call Bash. If you need to read a file, call Read. If you need to write a file, call Write.
+- Do NOT ask "should I do X?" — just do it.
+- Keep text responses very short. Prefer action over explanation.
+
+Tool usage:
+- Bash: Run shell commands (ls, git, npm, pip, python3, brew, etc.)
+- Read: Read file contents (always read before editing)
+- Write: Create new files (use absolute paths, e.g. /Users/username/file.py)
+- Edit: Modify existing files (old_string must exactly match)
+- Glob: Find files by pattern (e.g. "**/*.py")
+- Grep: Search file contents by regex
+- Always provide ALL required parameters for tool calls.
+"""
+
+
+def _extract_environment_info(sys_text):
+    """Extract # Environment section from Claude Code's system prompt."""
+    env_info = {}
+    # Look for environment section
+    env_start = sys_text.find("# Environment")
+    if env_start < 0:
+        return env_info
+    env_block = sys_text[env_start:]
+    # Extract key fields
+    for line in env_block.split("\n"):
+        line = line.strip().lstrip("- ")
+        if "working directory:" in line.lower():
+            env_info["cwd"] = line.split(":", 1)[1].strip()
+        elif "platform:" in line.lower():
+            env_info["platform"] = line.split(":", 1)[1].strip()
+        elif "shell:" in line.lower():
+            env_info["shell"] = line.split(":", 1)[1].strip()
+        elif "os version:" in line.lower():
+            env_info["os_version"] = line.split(":", 1)[1].strip()
+    return env_info
 
 # Essential tools only - drop tools that confuse local models
 # (Task, TaskOutput, AskUserQuestion, EnterPlanMode, ExitPlanMode etc.)
@@ -258,7 +337,8 @@ def _extract_tool_calls_from_text(text, known_tools=None):
     return tool_calls, remaining_text.strip()
 
 class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
-    _current_tool_names = []
+    # NOTE: _current_tool_names is set per-request in _handle_messages()
+    # to avoid thread-safety issues with concurrent requests
 
     def log_message(self, format, *args):
         print(f"[proxy] {args[0]}" if args else "")
@@ -301,7 +381,7 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         req_id = _next_request_id()
         t_start = time.time()
 
-        model = req.get("model", "qwen3-coder:30b")
+        requested_model = req.get("model", "qwen3-coder:30b")
         messages = req.get("messages", [])
         system = req.get("system", "")
         max_tokens = min(req.get("max_tokens", 4096), MAX_TOKENS_CAP)
@@ -309,6 +389,20 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         stream = req.get("stream", False)
         original_stream = stream
         tools_list = req.get("tools", [])
+
+        # Resolve model: route to appropriate local model
+        model, is_sidecar = _resolve_model(
+            requested_model,
+            has_tools=bool(tools_list),
+            message_count=len(messages),
+            max_tokens=max_tokens,
+        )
+        if model != requested_model:
+            print(f"[proxy] Model routed: {requested_model} -> {model} {'(sidecar)' if is_sidecar else ''}")
+
+        # Sidecar optimization: cap max_tokens lower for fast responses
+        if is_sidecar:
+            max_tokens = min(max_tokens, SIDECAR_MAX_TOKENS)
 
         # Filter tools to essential ones only
         if ALLOWED_TOOLS is not None and tools_list:
@@ -319,12 +413,15 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
             req["tools"] = tools_list
 
         has_tools = bool(tools_list)
-        self._current_tool_names = [t.get("name", "") for t in tools_list]
+        current_tool_names = [t.get("name", "") for t in tools_list]
 
         _log("req_meta", {
-            "model": model, "stream": stream, "has_tools": has_tools,
+            "requested_model": requested_model,
+            "resolved_model": model,
+            "is_sidecar": is_sidecar,
+            "stream": stream, "has_tools": has_tools,
             "tool_count": len(tools_list),
-            "tool_names": self._current_tool_names[:20],
+            "tool_names": current_tool_names[:20],
             "message_count": len(messages),
             "system_length": len(str(system)),
             "max_tokens": max_tokens,
@@ -347,14 +444,56 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
             else:
                 sys_text = str(system)
 
-            # Truncate overly long system prompts for local model
+            # Replace overly long system prompts with curated local version
             original_sys_len = len(sys_text)
-            if len(sys_text) > SYSTEM_PROMPT_MAX_CHARS:
-                sys_text = sys_text[:SYSTEM_PROMPT_MAX_CHARS] + "\n...(truncated for local model)"
-                print(f"[proxy] System prompt truncated: {original_sys_len} -> {len(sys_text)} chars")
+            if original_sys_len > SYSTEM_PROMPT_MAX_CHARS:
+                # Extract environment info BEFORE replacing (critical for OS awareness)
+                env_info = _extract_environment_info(sys_text)
+
+                # Extract any CLAUDE.md / user instructions from the original prompt
+                user_instructions = ""
+                for marker in ["# claudeMd", "Contents of", "CLAUDE.md"]:
+                    idx = sys_text.find(marker)
+                    if idx >= 0:
+                        end_idx = len(sys_text)
+                        for end_marker in ["\n# Environment", "\n# System", "\n<fast_mode"]:
+                            eidx = sys_text.find(end_marker, idx)
+                            if eidx > idx:
+                                end_idx = min(end_idx, eidx)
+                        user_instructions = sys_text[idx:end_idx].strip()
+                        break
+
+                sys_text = LOCAL_SYSTEM_PROMPT
+
+                # Inject environment info (prevents Linux assumption on macOS)
+                if env_info:
+                    env_block = "\n# Environment\n"
+                    if env_info.get("cwd"):
+                        env_block += f"- Working directory: {env_info['cwd']}\n"
+                    if env_info.get("platform"):
+                        env_block += f"- Platform: {env_info['platform']}\n"
+                    if env_info.get("os_version"):
+                        env_block += f"- OS: {env_info['os_version']}\n"
+                    if env_info.get("shell"):
+                        env_block += f"- Shell: {env_info['shell']}\n"
+                    # Add explicit OS guidance
+                    platform = env_info.get("platform", "").lower()
+                    if "darwin" in platform:
+                        env_block += "- This is macOS. Use macOS commands (brew, system_profiler, open, etc). Do NOT use apt, yum, or Linux-only tools.\n"
+                        env_block += f"- Home directory: /Users/ (NOT /home/)\n"
+                    elif "linux" in platform:
+                        env_block += "- This is Linux. Home directory: /home/\n"
+                    sys_text += env_block
+
+                if user_instructions:
+                    max_user = SYSTEM_PROMPT_MAX_CHARS - len(sys_text) - 50
+                    if len(user_instructions) > max_user > 0:
+                        user_instructions = user_instructions[:max_user] + "\n...(truncated)"
+                    sys_text += "\n# Project Instructions\n" + user_instructions + "\n"
+                print(f"[proxy] System prompt replaced: {original_sys_len} -> {len(sys_text)} chars (env: {bool(env_info)})")
 
             if has_tools:
-                tool_names_str = ", ".join(self._current_tool_names[:15])
+                tool_names_str = ", ".join(current_tool_names[:15])
                 fc_hint = (
                     "\n\n[IMPORTANT: FUNCTION CALLING]\n"
                     "You have tools available via function calling: " + tool_names_str + ".\n"
@@ -461,6 +600,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         # Debug: generate replay script
         _save_replay(req_id, req, PROXY_PORT)
 
+        timeout = SIDECAR_TIMEOUT if is_sidecar else 300
+
         try:
             oai_body = json.dumps(oai_req).encode("utf-8")
             oai_request = urllib.request.Request(
@@ -471,11 +612,11 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
             )
 
             if stream:
-                self._handle_stream(oai_request, model, req_id=req_id, t_start=t_start, msg_count=len(messages))
+                self._handle_stream(oai_request, model, req_id=req_id, t_start=t_start, msg_count=len(messages), timeout=timeout)
             elif original_stream:
-                self._handle_sync_as_sse(oai_request, model, req_id=req_id, t_start=t_start, msg_count=len(messages))
+                self._handle_sync_as_sse(oai_request, model, req_id=req_id, t_start=t_start, msg_count=len(messages), timeout=timeout, tool_names=current_tool_names)
             else:
-                self._handle_sync(oai_request, model, req_id=req_id, t_start=t_start, msg_count=len(messages))
+                self._handle_sync(oai_request, model, req_id=req_id, t_start=t_start, msg_count=len(messages), timeout=timeout, tool_names=current_tool_names)
 
         except urllib.error.URLError as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
@@ -493,7 +634,7 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
                 "error": {"type": "api_error", "message": str(e)},
             })
 
-    def _process_ollama_response(self, oai_resp):
+    def _process_ollama_response(self, oai_resp, current_tool_names=None):
         """Process ollama response, extract XML tool calls from text if needed."""
         choice = oai_resp.get("choices", [{}])[0]
         message = choice.get("message", {})
@@ -502,9 +643,9 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         tool_calls = message.get("tool_calls", [])
         finish_reason = choice.get("finish_reason", "end_turn")
 
-        if not tool_calls and content_text and self._current_tool_names:
+        if not tool_calls and content_text and current_tool_names:
             extracted, cleaned = _extract_tool_calls_from_text(
-                content_text, self._current_tool_names
+                content_text, current_tool_names
             )
             if extracted:
                 _log("xml_fallback", {
@@ -530,8 +671,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
 
         return content_text, reasoning_text, tool_calls, finish_reason
 
-    def _handle_sync(self, oai_request, model, req_id=0, t_start=None, msg_count=0):
-        resp = urllib.request.urlopen(oai_request, timeout=300)
+    def _handle_sync(self, oai_request, model, req_id=0, t_start=None, msg_count=0, timeout=300, tool_names=None):
+        resp = urllib.request.urlopen(oai_request, timeout=timeout)
         oai_resp = json.loads(resp.read())
         # [H3 fix] Log metadata only, not full response content
         _log("resp_from_ollama_sync_meta", {
@@ -543,7 +684,7 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         # Debug: log full Ollama response
         _debug_log(req_id, "ollama_response_full", oai_resp)
 
-        content_text, reasoning_text, tool_calls, finish_reason = self._process_ollama_response(oai_resp)
+        content_text, reasoning_text, tool_calls, finish_reason = self._process_ollama_response(oai_resp, current_tool_names=tool_names)
 
         content_blocks = []
         if reasoning_text:
@@ -590,8 +731,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
 
         self._respond(200, anthropic_resp)
 
-    def _handle_sync_as_sse(self, oai_request, model, req_id=0, t_start=None, msg_count=0):
-        resp = urllib.request.urlopen(oai_request, timeout=300)
+    def _handle_sync_as_sse(self, oai_request, model, req_id=0, t_start=None, msg_count=0, timeout=300, tool_names=None):
+        resp = urllib.request.urlopen(oai_request, timeout=timeout)
         oai_resp = json.loads(resp.read())
         _log("resp_from_ollama_sse_meta", {
             "model": oai_resp.get("model"),
@@ -602,7 +743,7 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         # Debug: log full Ollama response
         _debug_log(req_id, "ollama_response_full", oai_resp)
 
-        content_text, reasoning_text, tool_calls, finish_reason = self._process_ollama_response(oai_resp)
+        content_text, reasoning_text, tool_calls, finish_reason = self._process_ollama_response(oai_resp, current_tool_names=tool_names)
 
         msg_id = f"msg_{uuid.uuid4().hex[:24]}"
         self.send_response(200)
@@ -701,8 +842,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls] if tool_calls else None
         _debug_summary(req_id, model, msg_count, "sync", elapsed_ms, True, stop_reason, tool_names)
 
-    def _handle_stream(self, oai_request, model, req_id=0, t_start=None, msg_count=0):
-        resp = urllib.request.urlopen(oai_request, timeout=300)
+    def _handle_stream(self, oai_request, model, req_id=0, t_start=None, msg_count=0, timeout=300):
+        resp = urllib.request.urlopen(oai_request, timeout=timeout)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -725,19 +866,25 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         reasoning_started = False
         content_started = False
         content_index = 0
-        buffer = b""
         # Debug: accumulate full stream content
         accumulated_reasoning = []
         accumulated_content = []
-        for chunk in iter(lambda: resp.read(1), b""):
-            buffer += chunk
-            if chunk == b"\n":
-                line = buffer.decode("utf-8", errors="replace").strip()
-                buffer = b""
+
+        # Buffered SSE reading (much faster than byte-by-byte)
+        buf = b""
+        while True:
+            chunk = resp.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line_bytes, buf = buf.split(b"\n", 1)
+                line = line_bytes.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data: "):
                     continue
                 data_str = line[6:]
                 if data_str == "[DONE]":
+                    buf = b""  # signal done
                     break
                 try:
                     oai_chunk = json.loads(data_str)
@@ -779,6 +926,9 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
                         })
                 except json.JSONDecodeError:
                     continue
+            else:
+                continue
+            break  # [DONE] was received
 
         if in_reasoning:
             self._send_sse("content_block_stop", {"type": "content_block_stop", "index": content_index})
@@ -883,6 +1033,9 @@ def main():
     server = ThreadedHTTPServer(("127.0.0.1", port), AnthropicToOllamaHandler)
     print(f"[proxy] Anthropic -> Ollama proxy on http://127.0.0.1:{port}")
     print(f"[proxy] Ollama backend: {OLLAMA_BASE}")
+    print(f"[proxy] Main model: {MAIN_MODEL}")
+    print(f"[proxy] Sidecar model: {SIDECAR_MODEL}")
+    print(f"[proxy] Model routes: {len(MODEL_ROUTES)} rules")
     print(f"[proxy] Log dir: {LOG_DIR}")
     print(f"[proxy] Session: {os.path.basename(SESSION_DIR)}")
     print(f"[proxy] Debug mode: {'ON' if DEBUG_MODE else 'OFF'}")

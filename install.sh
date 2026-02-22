@@ -446,10 +446,18 @@ MANUAL_MODEL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model)
+            if [[ $# -lt 2 ]]; then
+                vapor_error "$(msg unknown_opt): --model requires a value"
+                exit 1
+            fi
             MANUAL_MODEL="$2"
             shift 2
             ;;
         --lang)
+            if [[ $# -lt 2 ]]; then
+                vapor_error "$(msg unknown_opt): --lang requires a value"
+                exit 1
+            fi
             LANG_CODE="$2"
             shift 2
             ;;
@@ -598,17 +606,24 @@ echo -e "  ${PURPLE}┃${NC} 🧠 ${BOLD}${WHITE}$(msg mem_label): ${NEON_GREEN}
 echo -e "  ${PURPLE}┃${NC}    ${CYAN}▐${NEON_GREEN}${RAM_BAR}${CYAN}▌${NC} ${DIM}${GRAY}(${RAM_GB}/${RAM_DISPLAY_MAX}GB)${NC}"
 echo ""
 
+# Sidecar model: lightweight model for permission checks, summaries, etc.
+SIDECAR_MODEL=""
+
 if [ -n "$MANUAL_MODEL" ]; then
     MODEL="$MANUAL_MODEL"
     vapor_info "$(msg manual_model): $MODEL"
 elif [ "$RAM_GB" -ge 32 ]; then
     MODEL="qwen3-coder:30b"
+    SIDECAR_MODEL="qwen3:8b"
     echo -e "  ${NEON_GREEN}┃${NC} 🏆 ${BOLD}${YELLOW}★★★ ＢＥＳＴ  ＭＯＤＥＬ ★★★${NC}"
     echo -e "  ${NEON_GREEN}┃${NC}    ${BOLD}${WHITE}$MODEL${NC} ${DIM}(19GB, MoE 3.3B active, $(msg model_best))${NC}"
+    echo -e "  ${NEON_GREEN}┃${NC}    ${DIM}+ sidecar: ${SIDECAR_MODEL} (5GB, fast helper)${NC}"
 elif [ "$RAM_GB" -ge 16 ]; then
     MODEL="qwen3:8b"
+    SIDECAR_MODEL="qwen3:1.7b"
     echo -e "  ${MINT}┃${NC} ⭐ ${BOLD}${CYAN}★★ ＧＲＥＡＴ  ＭＯＤＥＬ ★★${NC}"
     echo -e "  ${MINT}┃${NC}    ${BOLD}${WHITE}$MODEL${NC} ${DIM}(5GB, $(msg model_great))${NC}"
+    echo -e "  ${MINT}┃${NC}    ${DIM}+ sidecar: ${SIDECAR_MODEL} (1.1GB, fast helper)${NC}"
 elif [ "$RAM_GB" -ge 8 ]; then
     MODEL="qwen3:1.7b"
     vapor_warn "$MODEL (1.1GB, $(msg model_min))"
@@ -780,28 +795,45 @@ if ! curl -s --max-time 2 "http://localhost:11434/api/tags" &>/dev/null; then
     fi
 fi
 
-# モデルダウンロード (ollama pull の出力をそのまま表示)
-if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -q "$MODEL"; then
-    vapor_success "$MODEL $(msg model_downloaded) 🧠✨"
-else
+# Helper: download a model if not already present
+download_model() {
+    local model_name="$1"
+    local label="${2:-}"
+    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$model_name"; then
+        vapor_success "$model_name $(msg model_downloaded) 🧠✨ ${label}"
+        return 0
+    fi
     echo ""
     echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-    echo -e "  ${BOLD}${MAGENTA}  🔽  ${WHITE}$MODEL ${CYAN}$(msg model_downloading)${NC}"
+    echo -e "  ${BOLD}${MAGENTA}  🔽  ${WHITE}$model_name ${CYAN}$(msg model_downloading) ${label}${NC}"
     echo -e "  ${DIM}${AQUA}      $(msg model_download_hint)${NC}"
     echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
     echo ""
-    # ollama pull はプログレスバーを stdout に出すのでそのまま見せる
-    # MLX 警告だけ stderr から除外
-    ollama pull "$MODEL" 2>/dev/null
+    ollama pull "$model_name"
     echo ""
-    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -q "$MODEL"; then
+    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$model_name"; then
         echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-        vapor_success "$MODEL $(msg model_dl_done) 🧠🎉"
+        vapor_success "$model_name $(msg model_dl_done) 🧠🎉 ${label}"
         echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
     else
-        vapor_warn "$MODEL $(msg install_fail) - ollama pull $MODEL"
+        vapor_warn "$model_name $(msg install_fail) - ollama pull $model_name"
+        return 1
     fi
     echo ""
+    return 0
+}
+
+# Download main model
+if ! download_model "$MODEL" "(main)"; then
+    vapor_error "Failed to download main model: $MODEL"
+    vapor_warn "Try manually: ollama pull $MODEL"
+fi
+
+# Download sidecar model if different from main
+if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
+    if ! download_model "$SIDECAR_MODEL" "(sidecar)"; then
+        vapor_warn "Sidecar model download failed (non-critical): $SIDECAR_MODEL"
+    fi
 fi
 
 # =============================================
@@ -854,6 +886,7 @@ else
 # Auto-generated: $(date '+%Y-%m-%d %H:%M:%S')
 
 MODEL="$MODEL"
+SIDECAR_MODEL="${SIDECAR_MODEL}"
 PROXY_PORT=8082
 OLLAMA_HOST="http://localhost:11434"
 EOF
@@ -930,10 +963,18 @@ else
     vapor_warn "Claude Code CLI     → 🟡 $(msg path_reopen)"
 fi
 
-if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -q "$MODEL"; then
+if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$MODEL"; then
     vapor_success "AI Model ($MODEL) → 🟢 $(msg loaded)"
 else
-    vapor_warn "AI Model            → 🟡 $(msg not_loaded)"
+    vapor_warn "AI Model ($MODEL) → 🟡 $(msg not_loaded)"
+fi
+
+if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
+    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$SIDECAR_MODEL"; then
+        vapor_success "Sidecar  ($SIDECAR_MODEL) → 🟢 $(msg loaded)"
+    else
+        vapor_warn "Sidecar  ($SIDECAR_MODEL) → 🟡 $(msg not_loaded)"
+    fi
 fi
 
 # テンポラリログ削除
@@ -986,6 +1027,9 @@ rainbow_text "    ════════════════════�
 echo ""
 echo -e "    ${BOLD}${WHITE}⚙️  $(msg settings)${NC}"
 echo -e "    ${PURPLE}┃${NC} $(msg label_model):     ${BOLD}${NEON_GREEN}$MODEL${NC}"
+if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
+    echo -e "    ${PURPLE}┃${NC} Sidecar:    ${BOLD}${AQUA}$SIDECAR_MODEL${NC}"
+fi
 echo -e "    ${PURPLE}┃${NC} $(msg label_config):       ${AQUA}$CONFIG_FILE${NC}"
 echo -e "    ${PURPLE}┃${NC} $(msg label_command):   ${AQUA}$BIN_DIR/vibe-local${NC}"
 echo ""

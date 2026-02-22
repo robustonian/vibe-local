@@ -70,13 +70,15 @@ vibe-local --model qwen3:8b
 
 ### 対応環境
 
-| 環境 | メモリ | モデル | 備考 |
-|------|--------|--------|------|
-| Apple Silicon Mac (M1以降) | 32GB+ | qwen3-coder:30b | 🏆 **推奨** |
-| Apple Silicon Mac (M1以降) | 16GB | qwen3:8b | ⭐ 十分実用的 |
-| Apple Silicon Mac (M1以降) | 8GB | qwen3:1.7b | 最低限動作 |
-| Intel Mac | 16GB+ | qwen3:8b | 動作するが遅め |
-| Linux (x86_64/arm64) | 16GB+ | qwen3:8b | NVIDIA GPU推奨 |
+| 環境 | メモリ | メインモデル | サイドカー | 備考 |
+|------|--------|-------------|-----------|------|
+| Apple Silicon Mac (M1以降) | 32GB+ | qwen3-coder:30b | qwen3:8b | 🏆 **推奨** |
+| Apple Silicon Mac (M1以降) | 16GB | qwen3:8b | qwen3:1.7b | ⭐ 十分実用的 |
+| Apple Silicon Mac (M1以降) | 8GB | qwen3:1.7b | なし | 最低限動作 |
+| Intel Mac | 16GB+ | qwen3:8b | qwen3:1.7b | 動作するが遅め |
+| Linux (x86_64/arm64) | 16GB+ | qwen3:8b | qwen3:1.7b | NVIDIA GPU推奨 |
+
+> サイドカーモデル = 権限チェックや初期化プローブなど軽量タスク用。自動選択されます。
 
 ### トラブルシューティング
 
@@ -103,6 +105,13 @@ npm install -g @anthropic-ai/claude-code
 ```bash
 nano ~/.config/vibe-local/config
 # MODEL="qwen3:8b" を変更
+# SIDECAR_MODEL="qwen3:1.7b"  # 軽量タスク用（省略可・自動選択）
+```
+
+**デバッグログを確認したい**
+```bash
+VIBE_LOCAL_DEBUG=1 vibe-local
+# ログにモデルルーティング情報（sidecar/main）が表示されます
 ```
 
 </details>
@@ -207,13 +216,15 @@ vibe-local --model qwen3:8b
 
 ### Supported Environments
 
-| Environment | RAM | Model | Notes |
-|-------------|-----|-------|-------|
-| Apple Silicon Mac (M1+) | 32GB+ | qwen3-coder:30b | 🏆 **Recommended** |
-| Apple Silicon Mac (M1+) | 16GB | qwen3:8b | ⭐ Very capable |
-| Apple Silicon Mac (M1+) | 8GB | qwen3:1.7b | Minimum viable |
-| Intel Mac | 16GB+ | qwen3:8b | Works but slower |
-| Linux (x86_64/arm64) | 16GB+ | qwen3:8b | NVIDIA GPU recommended |
+| Environment | RAM | Main Model | Sidecar | Notes |
+|-------------|-----|------------|---------|-------|
+| Apple Silicon Mac (M1+) | 32GB+ | qwen3-coder:30b | qwen3:8b | 🏆 **Recommended** |
+| Apple Silicon Mac (M1+) | 16GB | qwen3:8b | qwen3:1.7b | ⭐ Very capable |
+| Apple Silicon Mac (M1+) | 8GB | qwen3:1.7b | none | Minimum viable |
+| Intel Mac | 16GB+ | qwen3:8b | qwen3:1.7b | Works but slower |
+| Linux (x86_64/arm64) | 16GB+ | qwen3:8b | qwen3:1.7b | NVIDIA GPU recommended |
+
+> Sidecar model = auto-selected lighter model for permission checks, init probes, and short summaries.
 
 ### Troubleshooting
 
@@ -240,6 +251,13 @@ npm install -g @anthropic-ai/claude-code
 ```bash
 nano ~/.config/vibe-local/config
 # Change MODEL="qwen3:8b"
+# SIDECAR_MODEL="qwen3:1.7b"  # For lightweight tasks (optional, auto-selected)
+```
+
+**Enable debug logging**
+```bash
+VIBE_LOCAL_DEBUG=1 vibe-local
+# Logs show model routing info — which requests go to main vs sidecar
 ```
 
 </details>
@@ -287,13 +305,15 @@ vibe-local --model qwen3:8b
 
 ### 支持的环境
 
-| 环境 | 内存 | 模型 | 备注 |
-|------|------|------|------|
-| Apple Silicon Mac (M1及以上) | 32GB+ | qwen3-coder:30b | 🏆 **推荐** |
-| Apple Silicon Mac (M1及以上) | 16GB | qwen3:8b | ⭐ 足够实用 |
-| Apple Silicon Mac (M1及以上) | 8GB | qwen3:1.7b | 最低限运行 |
-| Intel Mac | 16GB+ | qwen3:8b | 可运行但较慢 |
-| Linux (x86_64/arm64) | 16GB+ | qwen3:8b | 推荐NVIDIA GPU |
+| 环境 | 内存 | 主模型 | 边车模型 | 备注 |
+|------|------|--------|---------|------|
+| Apple Silicon Mac (M1及以上) | 32GB+ | qwen3-coder:30b | qwen3:8b | 🏆 **推荐** |
+| Apple Silicon Mac (M1及以上) | 16GB | qwen3:8b | qwen3:1.7b | ⭐ 足够实用 |
+| Apple Silicon Mac (M1及以上) | 8GB | qwen3:1.7b | 无 | 最低限运行 |
+| Intel Mac | 16GB+ | qwen3:8b | qwen3:1.7b | 可运行但较慢 |
+| Linux (x86_64/arm64) | 16GB+ | qwen3:8b | qwen3:1.7b | 推荐NVIDIA GPU |
+
+> 边车模型 = 用于权限检查、初始化探测等轻量任务的自动选择的较小模型。
 
 ### 故障排除
 
@@ -320,6 +340,13 @@ npm install -g @anthropic-ai/claude-code
 ```bash
 nano ~/.config/vibe-local/config
 # 修改 MODEL="qwen3:8b"
+# SIDECAR_MODEL="qwen3:1.7b"  # 轻量任务用（可选，自动选择）
+```
+
+**启用调试日志**
+```bash
+VIBE_LOCAL_DEBUG=1 vibe-local
+# 日志会显示模型路由信息（主模型/边车模型）
 ```
 
 </details>
@@ -329,18 +356,78 @@ nano ~/.config/vibe-local/config
 ## 🔧 Architecture
 
 ```
-User
-  ↓
-vibe-local (launch script)
-  ↓
-Claude Code CLI (UI + agent features)
-  ↓
-anthropic-ollama-proxy (API translation)
-  ↓
-Ollama (local LLM runtime)
-  ↓
-qwen3-coder:30b (AI model)
+┌─────────────────────────────────────────────────────────┐
+│  User                                                   │
+│  └─> vibe-local.sh (launch script)                      │
+│       ├─ Ensure Ollama is running                       │
+│       ├─ Start anthropic-ollama-proxy.py                │
+│       ├─ Set ANTHROPIC_BASE_URL → proxy                 │
+│       └─ Launch Claude Code CLI                         │
+└──────────────────────┬──────────────────────────────────┘
+                       │ Anthropic Messages API
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  anthropic-ollama-proxy.py                              │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │ 1. System Prompt Optimizer                         │ │
+│  │    - Replace ~15K Claude prompt → ~1K local prompt │ │
+│  │    - Extract & inject environment (OS, cwd, shell) │ │
+│  │    - Preserve CLAUDE.md user instructions          │ │
+│  │    - Add function-calling reinforcement hints      │ │
+│  ├────────────────────────────────────────────────────┤ │
+│  │ 2. Tool Filter                                     │ │
+│  │    - 20+ tools → 9 essential (Bash, Read, Write,   │ │
+│  │      Edit, Glob, Grep, WebFetch, WebSearch,        │ │
+│  │      NotebookEdit)                                 │ │
+│  ├────────────────────────────────────────────────────┤ │
+│  │ 3. Model Router                                    │ │
+│  │    ┌───────────────────┐  ┌──────────────────────┐ │ │
+│  │    │ Main Model        │  │ Sidecar Model        │ │ │
+│  │    │ (qwen3-coder:30b) │  │ (qwen3:8b)           │ │ │
+│  │    │ - Coding tasks    │  │ - Permission checks  │ │ │
+│  │    │ - Tool use        │  │ - Init probes        │ │ │
+│  │    │ - Long context    │  │ - haiku/flash/mini   │ │ │
+│  │    │ - max_tokens:8192 │  │ - max_tokens:1024    │ │ │
+│  │    └───────┬───────────┘  └──────────┬───────────┘ │ │
+│  ├────────────┼─────────────────────────┼─────────────┤ │
+│  │ 4. API Translation (Anthropic → OpenAI format)     │ │
+│  │ 5. XML Tool Call Fallback Parser                   │ │
+│  │ 6. SSE Stream Conversion                           │ │
+│  └────────────┼─────────────────────────┼─────────────┘ │
+└───────────────┼─────────────────────────┼───────────────┘
+                │  OpenAI Chat API        │
+                ▼                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Ollama (localhost:11434)                               │
+│  Local LLM inference runtime                            │
+└─────────────────────────────────────────────────────────┘
 ```
+
+### Dual-model routing / デュアルモデル構成 / 双模型架构
+
+The proxy automatically routes requests to two models:
+- **Main model** (e.g. `qwen3-coder:30b`): Coding tasks with tool use, long context
+- **Sidecar model** (e.g. `qwen3:8b`): Permission checks, init probes, short summaries
+
+Routing rules (checked in order):
+1. Model name contains `haiku`/`flash`/`mini` → sidecar
+2. `max_tokens==1`, no tools, ≤1 message (init probe) → sidecar
+3. Everything else → main model
+
+Debug logs show `(sidecar)` for routed requests: `VIBE_LOCAL_DEBUG=1 vibe-local`
+
+### Configuration / 設定 / 配置
+
+```bash
+~/.config/vibe-local/config
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `MODEL` | auto (by RAM) | Main model name |
+| `SIDECAR_MODEL` | auto (by RAM) | Sidecar model name |
+| `PROXY_PORT` | 8082 | Proxy listen port |
+| `OLLAMA_HOST` | http://localhost:11434 | Ollama API endpoint |
 
 ## 🚨 Security / セキュリティ / 安全须知
 
