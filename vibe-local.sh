@@ -11,6 +11,7 @@
 #   vibe-local --auto             # ネットワーク状況で自動判定
 #   vibe-local --model qwen3:8b   # モデル手動指定
 #   vibe-local -y                 # パーミッション確認スキップ (自己責任)
+#   vibe-local --debug            # デバッグモード (フルリクエスト/レスポンスログ)
 
 # NOTE: set -e を使わない (途中停止を防ぐ)
 set -uo pipefail
@@ -29,6 +30,7 @@ PROXY_SCRIPT="${PROXY_LIB_DIR}/anthropic-ollama-proxy.py"
 MODEL=""
 OLLAMA_HOST="http://localhost:11434"
 PROXY_PORT=8082
+VIBE_LOCAL_DEBUG=0
 
 # [C1 fix] source ではなく grep で既知キーのみ安全に読む
 if [ -f "$CONFIG_FILE" ]; then
@@ -36,10 +38,12 @@ if [ -f "$CONFIG_FILE" ]; then
     _m="$(_val MODEL)"
     _p="$(_val PROXY_PORT)"
     _h="$(_val OLLAMA_HOST)"
+    _d="$(_val VIBE_LOCAL_DEBUG)"
     [ -n "$_m" ] && MODEL="$_m"
     [ -n "$_p" ] && PROXY_PORT="$_p"
     [ -n "$_h" ] && OLLAMA_HOST="$_h"
-    unset _val _m _p _h
+    [ -n "$_d" ] && VIBE_LOCAL_DEBUG="$_d"
+    unset _val _m _p _h _d
 fi
 
 # config が無い場合、RAM からモデルを自動判定
@@ -145,7 +149,7 @@ ensure_proxy() {
     fi
 
     # プロキシ起動
-    python3 "$PROXY_SCRIPT" "$PROXY_PORT" &>"$PROXY_LOG" &
+    VIBE_LOCAL_DEBUG="$VIBE_LOCAL_DEBUG" python3 "$PROXY_SCRIPT" "$PROXY_PORT" &>"$PROXY_LOG" &
     local pid=$!
     echo "$pid" > "$PROXY_PID_FILE"
 
@@ -218,6 +222,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -y|--yes)
             YES_FLAG=1
+            shift
+            ;;
+        --debug)
+            VIBE_LOCAL_DEBUG=1
             shift
             ;;
         *)
@@ -320,15 +328,24 @@ if [ ${#PERM_ARGS[@]} -gt 0 ]; then
     PERM_LABEL="ツール自動許可 (auto-approve)"
 fi
 
+DEBUG_LABEL="OFF"
+if [ "$VIBE_LOCAL_DEBUG" -eq 1 ]; then
+    DEBUG_LABEL="ON (full request/response logging)"
+fi
+
 echo ""
 echo "============================================"
-echo " 🤖 Claude Code (ローカルモード)"
+echo " 🤖 vibe-local"
 echo " Model: $MODEL"
 echo " Proxy: $PROXY_URL → $OLLAMA_HOST"
 echo " Permissions: $PERM_LABEL"
+echo " Debug: $DEBUG_LABEL"
 echo "============================================"
+echo ""
+echo " Launching Claude Code..."
 echo ""
 
 ANTHROPIC_BASE_URL="$PROXY_URL" \
 ANTHROPIC_API_KEY="local" \
+VIBE_LOCAL_DEBUG="$VIBE_LOCAL_DEBUG" \
 exec claude --model "$MODEL" ${PERM_ARGS[@]+"${PERM_ARGS[@]}"} ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
