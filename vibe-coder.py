@@ -3471,7 +3471,7 @@ class Session:
         # Force compaction if too many messages regardless of token estimate
         if not force and len(self.messages) > 300:
             force = True
-        max_tokens = self.config.context_window * 0.75  # leave room
+        max_tokens = self.config.context_window * 0.70  # leave 30% room for response + overhead
         if not force and self.get_token_estimate() < max_tokens:
             return
         # Prevent infinite re-compaction: skip if we already compacted at this message count
@@ -3480,7 +3480,7 @@ class Session:
         self._last_compact_msg_count = len(self.messages)
 
         # Always keep last 20 messages
-        preserve_count = min(20, len(self.messages))
+        preserve_count = min(30, len(self.messages))  # Keep more context for coding tasks
         cutoff = len(self.messages) - preserve_count
 
         # --- Sidecar summarization path ---

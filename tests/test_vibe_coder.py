@@ -765,9 +765,9 @@ class TestSession:
                 session.add_assistant_message("y" * 200)
             old_count = len(session.messages)
             session.compact_if_needed()
-            # After compaction, old messages should be dropped, keeping recent 20
+            # After compaction, old messages should be dropped, keeping recent ~30
             assert len(session.messages) < old_count
-            assert len(session.messages) <= 20
+            assert len(session.messages) <= 31  # preserve_count=30 + summary message
 
     def test_get_messages_includes_system(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2579,7 +2579,7 @@ class TestCompactionActuallyDrops:
         session.compact_if_needed()
         # Should actually drop old messages, not just truncate content
         assert len(session.messages) < old_len
-        assert len(session.messages) <= 20
+        assert len(session.messages) <= 31  # preserve_count=30 + possible summary
 
 
 class TestGitSlashCommandSafety:
@@ -3048,14 +3048,14 @@ class TestSidecarSummarization:
             "choices": [{"message": {"content": "- Summary point 1\n- Summary point 2"}}]
         }
         session.set_client(mock_client)
-        for i in range(30):
+        for i in range(50):
             session.messages.append({"role": "user", "content": f"msg {i} " + "x" * 50})
             session._token_estimate += 20
         session._token_estimate = 180
         old_count = len(session.messages)
         session.compact_if_needed()
         assert len(session.messages) < old_count
-        # Should have summary message
+        # Should have summary message (summary + ~30 preserved)
         has_summary = any("Summary" in m.get("content", "") or "summary" in m.get("content", "").lower()
                           for m in session.messages if m.get("content"))
         assert has_summary
