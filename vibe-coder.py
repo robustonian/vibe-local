@@ -131,6 +131,17 @@ def _get_terminal_width():
     except Exception:
         return 80
 
+def _probe_is_ollama(host, timeout=1):
+    """Return True if host is genuine Ollama (GET / returns 'Ollama is running')."""
+    try:
+        req = urllib.request.Request(f"{host}/")
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        body = resp.read(64).decode("utf-8", errors="ignore")
+        resp.close()
+        return "Ollama is running" in body
+    except Exception:
+        return False
+
 
 def _display_width(text):
     """Calculate terminal display width accounting for CJK double-width characters."""
@@ -4108,7 +4119,7 @@ class TUI:
         # Subtitle with neon glow effect
         print(f"\n  {_ansi(chr(27)+'[38;5;51m')}{C.BOLD}🌴 O F F L I N E  A I  C O D I N G  A G E N T 🌴{C.RESET}")
         print(f"  {_ansi(chr(27)+'[38;5;87m')}v{__version__}{C.RESET}  "
-              f"{C.DIM}// No login • No cloud • Fully OSS • Powered by Ollama{C.RESET}")
+              f"{C.DIM}// No login • No cloud • Fully OSS • Local AI{C.RESET}")
 
         # Adaptive rainbow separator (use ── U+2500 Na width, safe for CJK terminals)
         sep_colors = [198, 199, 200, 201, 165, 129, 93, 57, 51, 45, 39, 33, 27, 33, 39, 45, 51, 57, 93, 129, 165, 201, 200, 199]
@@ -4136,7 +4147,11 @@ class TUI:
             _tier_str = " %s[Tier %s]%s" % (_ansi(chr(27) + "[38;5;%sm" % _tc), _tier, C.RESET)
         print(f"  {model_icon} {info_dim}Model{C.RESET}  {model_color}{C.BOLD}{config.model}{C.RESET}{_tier_str}")
         print(f"  🔒 {info_dim}Mode{C.RESET}   {mode_str}")
-        print(f"  🦙 {info_dim}Engine{C.RESET} {info_bright}Ollama{C.RESET} {C.DIM}({config.ollama_host}){C.RESET}")
+        if _probe_is_ollama(config.ollama_host):
+            engine_icon, engine_name = "🦙", "Ollama"
+        else:
+            engine_icon, engine_name = "⚡", "OpenAI-compatible"
+        print(f"  {engine_icon} {info_dim}Engine{C.RESET} {info_bright}{engine_name}{C.RESET} {C.DIM}({config.ollama_host}){C.RESET}")
         print(f"  💾 {info_dim}RAM{C.RESET}    {info_bright}{ram}GB{C.RESET} {C.DIM}(ctx: {config.context_window} tokens){C.RESET}")
         print(f"  📁 {info_dim}CWD{C.RESET}    {C.WHITE}{os.getcwd()}{C.RESET}")
 
