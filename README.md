@@ -70,8 +70,11 @@ vibe-local
 # 対話モード（AIと会話しながらコーディング）
 vibe-local
 
-# ワンショット（1回だけ質問）
-vibe-local -p "Pythonでじゃんけんゲーム作って"
+# ワンショット（1回だけ質問）— AIの回答のみ出力（スクリプト組み込みに最適）
+vibe-local -y -p "Pythonでじゃんけんゲーム作って"
+
+# ワンショット + ツール実行ログも表示
+vibe-local -y -p "lsコマンドを使って" --verbose
 
 # モデルを手動指定
 vibe-local --model qwen3:8b
@@ -166,8 +169,8 @@ vibe-local
 # AIと はなしながら プログラムを つくる
 vibe-local
 
-# 1かいだけ しつもんする
-vibe-local -p "Pythonで じゃんけんゲームを つくって"
+# 1かいだけ しつもんする（こたえだけ でてくる）
+vibe-local -y -p "Pythonで じゃんけんゲームを つくって"
 ```
 
 ### たいわ コマンド（はなしている ときに つかえる めいれい）
@@ -252,8 +255,11 @@ vibe-local
 # Interactive mode (chat with AI while coding)
 vibe-local
 
-# One-shot (ask once)
-vibe-local -p "Create a snake game in Python"
+# One-shot headless — outputs only the AI response (great for scripting)
+vibe-local -y -p "Create a snake game in Python"
+
+# One-shot with tool execution logs visible
+vibe-local -y -p "List files with ls" --verbose
 
 # Specify model manually
 vibe-local --model qwen3:8b
@@ -506,7 +512,9 @@ There are many excellent open-source projects in the AI coding agent space. Each
 
 | Flag | Short | Description | 説明 | 说明 |
 |------|-------|-------------|------|------|
-| `--prompt` | `-p` | One-shot prompt (non-interactive) | ワンショットプロンプト | 单次提示 |
+| `--prompt` | `-p` | One-shot prompt (non-interactive, enables quiet mode) | ワンショット（自動でquietモード） | 单次提示（自动启用安静模式） |
+| `--quiet` | `-q` | Output only the AI response (for scripting) | AIの回答のみ出力（スクリプト向け） | 仅输出AI响应（适合脚本） |
+| `--verbose` | | Show tool execution logs in quiet/headless mode | quietモードでもツールログを表示 | 安静模式下显示工具日志 |
 | `--model` | `-m` | Specify Ollama model name | Ollamaモデル名を指定 | 指定Ollama模型 |
 | `--yes` | `-y` | Auto-approve all tool calls | 全ツール自動許可 | 自动批准所有工具 |
 | `--debug` | | Enable debug logging | デバッグログ有効化 | 启用调试日志 |
@@ -693,7 +701,7 @@ ollama pull qwen3:8b          # For 16GB machines
 ollama pull qwen3-coder:30b   # For 32GB machines (recommended)
 
 # 3. Verify
-vibe-local -p "Write Hello World in Python"
+vibe-local -y -p "Write Hello World in Python"
 ```
 
 ### Starter exercises / 課題例

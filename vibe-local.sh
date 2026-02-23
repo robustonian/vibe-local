@@ -161,6 +161,7 @@ check_network() {
 # --- 引数パース ---
 AUTO_MODE=0
 YES_FLAG=0
+PROMPT_FLAG=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -184,6 +185,16 @@ while [[ $# -gt 0 ]]; do
         --debug)
             VIBE_LOCAL_DEBUG=1
             shift
+            ;;
+        -p|--prompt)
+            PROMPT_FLAG=1
+            EXTRA_ARGS+=("$1")
+            if [[ $# -lt 2 ]]; then
+                echo "Error: -p requires an argument"
+                exit 1
+            fi
+            EXTRA_ARGS+=("$2")
+            shift 2
             ;;
         *)
             EXTRA_ARGS+=("$1")
@@ -314,18 +325,20 @@ if [ "$VIBE_LOCAL_DEBUG" = "1" ] || [ "$VIBE_LOCAL_DEBUG" = "true" ]; then
 fi
 
 # --- 起動 ---
-echo ""
-echo "============================================"
-echo " 🤖 vibe-local (vibe-coder)"
-if [ -n "$MODEL" ]; then
-    echo " Model: $MODEL"
-else
-    echo " Model: (auto-detect)"
+if [ "$PROMPT_FLAG" -eq 0 ]; then
+    echo ""
+    echo "============================================"
+    echo " 🤖 vibe-local (vibe-coder)"
+    if [ -n "$MODEL" ]; then
+        echo " Model: $MODEL"
+    else
+        echo " Model: (auto-detect)"
+    fi
+    echo " Ollama: $OLLAMA_HOST"
+    echo " Engine: vibe-coder.py (direct, no proxy)"
+    echo "============================================"
+    echo ""
 fi
-echo " Ollama: $OLLAMA_HOST"
-echo " Engine: vibe-coder.py (direct, no proxy)"
-echo "============================================"
-echo ""
 
 OLLAMA_HOST="$OLLAMA_HOST" \
 VIBE_LOCAL_API_KEY="${VIBE_LOCAL_API_KEY:-}" \

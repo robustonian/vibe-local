@@ -187,6 +187,8 @@ class Config:
         self.context_window = self.DEFAULT_CONTEXT_WINDOW
         self.prompt = None          # -p one-shot prompt
         self.yes_mode = False       # -y auto-approve
+        self.quiet = False          # -q / auto-enabled with -p
+        self.verbose = False        # --verbose: show tool I/O in quiet mode
         self.debug = False
         self.resume = False
         self.session_id = None
@@ -345,10 +347,16 @@ class Config:
         parser.add_argument("--version", action="version", version=f"vibe-coder {__version__}")
         parser.add_argument("--dangerously-skip-permissions", action="store_true",
                             help="Alias for -y (compatibility)")
+        parser.add_argument("-q", "--quiet", action="store_true",
+                            help="Output only the AI response (for scripting/headless use)")
+        parser.add_argument("--verbose", action="store_true",
+                            help="Show tool execution output even in quiet/headless mode")
         args = parser.parse_args(argv)
 
         if args.prompt:
             self.prompt = args.prompt
+        self.quiet = args.quiet or bool(args.prompt)
+        self.verbose = args.verbose
         if args.model:
             self.model = args.model
         if args.yes or args.dangerously_skip_permissions:
@@ -4084,6 +4092,8 @@ class TUI:
     def banner(self, config, model_ok=True):
         """Print spectacular startup banner — vaporwave/neon aesthetic.
         Adapts to terminal width for narrow terminals."""
+        if config.quiet:
+            return
         term_w = _get_terminal_width()
 
         if term_w >= 82:
@@ -4274,7 +4284,7 @@ class TUI:
         raw_parts = []
         in_think = False
         think_buf = ""    # buffer to detect <think> / </think> split across chunks
-        header_printed = False
+        header_printed = self.config.quiet  # quiet mode: skip "assistant: " prefix
 
         for chunk in response_iter:
             delta = chunk.get("choices", [{}])[0].get("delta", {})
@@ -4359,7 +4369,8 @@ class TUI:
 
         # Display text
         if content.strip():
-            print(f"\n{C.BBLUE}assistant{C.RESET}: ", end="")
+            if not self.config.quiet:
+                print(f"\n{C.BBLUE}assistant{C.RESET}: ", end="")
             self._render_markdown(content)
             print()
 
@@ -4417,6 +4428,8 @@ class TUI:
 
     def show_tool_call(self, name, params):
         """Display a tool call being made with Claude Code-style formatting."""
+        if self.config.quiet and not self.config.verbose:
+            return
         self.stop_spinner()
         icon, color = self._tool_icons().get(name, ("🔧", C.YELLOW))
         self._term_cols = _get_terminal_width()  # refresh on each call
@@ -4494,6 +4507,8 @@ class TUI:
 
     def show_tool_result(self, name, result, is_error=False):
         """Display tool result (abbreviated) with Claude Code-style output."""
+        if self.config.quiet and not self.config.verbose:
+            return
         self.stop_spinner()
         output = result if isinstance(result, str) else str(result)
         # Strip ANSI escape sequences from tool output to prevent double-escaping (C16)
@@ -4810,7 +4825,7 @@ class Agent:
                     # Show per-turn token usage (subtle, always visible)
                     prompt_t = usage.get("prompt_tokens", 0)
                     completion_t = usage.get("completion_tokens", 0)
-                    if prompt_t or completion_t:
+                    if (prompt_t or completion_t) and not self.config.quiet:
                         pct = min(int(((prompt_t + completion_t) / self.config.context_window) * 100), 100)
                         print(f"  {_ansi(chr(27)+'[38;5;240m')}tokens: {prompt_t}→{completion_t} "
                               f"({pct}% ctx){C.RESET}")
