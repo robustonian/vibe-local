@@ -93,6 +93,18 @@ class C:
                 setattr(cls, attr, "")
         cls._enabled = False
 
+# On Windows, try to enable ANSI/VT processing in the console
+if os.name == "nt":
+    try:
+        import ctypes
+        _kernel32 = ctypes.windll.kernel32
+        _handle = _kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        _mode = ctypes.c_ulong()
+        _kernel32.GetConsoleMode(_handle, ctypes.byref(_mode))
+        _kernel32.SetConsoleMode(_handle, _mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
 # Disable colors if not a terminal, NO_COLOR is set, or TERM=dumb
 if (not sys.stdout.isatty()
         or os.environ.get("NO_COLOR") is not None
@@ -1050,8 +1062,12 @@ class BashTool(Tool):
                     continue
                 clean_env[k] = v
             if "PATH" not in clean_env:
-                clean_env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
-            clean_env.setdefault("LANG", "en_US.UTF-8")
+                if os.name == "nt":
+                    clean_env["PATH"] = os.environ.get("PATH", "")
+                else:
+                    clean_env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+            if os.name != "nt":
+                clean_env.setdefault("LANG", "en_US.UTF-8")
             # Use process group on Unix to ensure all child processes are killed on timeout
             use_pgroup = platform.system() != "Windows"
             popen_kwargs = {
@@ -1060,6 +1076,8 @@ class BashTool(Tool):
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
                 "cwd": os.getcwd(),
                 "env": clean_env,
             }
