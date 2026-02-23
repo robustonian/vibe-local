@@ -406,8 +406,14 @@ vaporwave_progress() {
 SPINNER_LOG="$(mktemp /tmp/vibe-local-install-XXXXXX.log 2>/dev/null || echo "/tmp/vibe-local-install-$RANDOM-$$.log")"
 
 # [SEC] Ensure temp log is cleaned up on exit or interrupt
+_INSTALL_OK=0
 cleanup() {
-    [ -f "${SPINNER_LOG:-}" ] && rm -f "$SPINNER_LOG"
+    if [ "${_INSTALL_OK:-0}" -eq 0 ] && [ -f "${SPINNER_LOG:-}" ] && [ -s "$SPINNER_LOG" ]; then
+        echo ""
+        echo -e "  ${DIM}Install log saved: $SPINNER_LOG${NC}"
+    else
+        [ -f "${SPINNER_LOG:-}" ] && rm -f "$SPINNER_LOG"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -489,6 +495,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --model MODEL  $(msg help_model)"
             echo "  --lang LANG    $(msg help_lang)"
+            echo "  --help, -h     Show this help"
             exit 0
             ;;
         *)
@@ -512,7 +519,8 @@ fi
 # ║  🌅  Ｔ Ｉ Ｔ Ｌ Ｅ   Ｓ Ｃ Ｒ Ｅ Ｅ Ｎ                ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-clear 2>/dev/null || true
+# NOTE: Do not clear — preserve user's terminal scrollback context
+echo ""
 echo ""
 
 # Animated entrance
@@ -600,7 +608,7 @@ case "$OS" in
         if [ "$ARCH" = "arm64" ]; then
             vapor_success "$(msg apple_silicon)"
         elif [ "$ARCH" = "x86_64" ]; then
-            vapor_warn "$(msg intel_mac)"
+            vapor_info "$(msg intel_mac)"
         else
             vapor_error "$(msg unsupported_arch): $ARCH"
             exit 1
@@ -712,9 +720,12 @@ if [ "$IS_MAC" -eq 1 ]; then
     else
         vapor_info "$(msg brew_slow)"
         vapor_warn "⚠️  A popup may appear asking to install Developer Tools — click Install if it does."
-        vapor_warn "⚠️  You may also be asked for your Mac password."
+        vapor_warn "⚠️  You may also be asked for your Mac password (sudo)."
         vapor_info "Homebrew 🍺 $(msg installing)"
-        if run_with_spinner "Homebrew 🍺 $(msg installing)" /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+        echo ""
+        # NOTE: Do NOT use run_with_spinner here — Homebrew installer needs
+        # interactive TTY for sudo password prompt. Spinner would swallow it.
+        if /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
             if [ -f /opt/homebrew/bin/brew ]; then
                 eval "$(/opt/homebrew/bin/brew shellenv)"
             fi
@@ -739,7 +750,11 @@ else
             vapor_warn "$(msg install_fail_hint): brew install ollama"
         fi
     elif [ "$IS_LINUX" -eq 1 ]; then
-        if run_with_spinner "Ollama 🦙 $(msg installing)" bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
+        # NOTE: Do NOT use run_with_spinner here — Ollama installer calls
+        # sudo internally and needs interactive TTY for password prompt.
+        vapor_info "Ollama 🦙 $(msg installing)"
+        echo ""
+        if bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
             vapor_success "Ollama 🦙 $(msg install_done)"
         else
             vapor_error "Ollama 🦙 $(msg install_fail)"
@@ -1002,18 +1017,30 @@ fi
 
 # Detect shell rc file (used for PATH setup and post-install hint)
 SHELL_RC=""
-if [ -f "${HOME}/.zshrc" ]; then
+_current_shell="$(basename "${SHELL:-}" 2>/dev/null || echo "")"
+if [ "$_current_shell" = "fish" ] && [ -d "${HOME}/.config/fish" ]; then
+    SHELL_RC="${HOME}/.config/fish/config.fish"
+elif [ -f "${HOME}/.zshrc" ]; then
     SHELL_RC="${HOME}/.zshrc"
 elif [ -f "${HOME}/.bashrc" ]; then
     SHELL_RC="${HOME}/.bashrc"
+elif [ -f "${HOME}/.bash_profile" ]; then
+    SHELL_RC="${HOME}/.bash_profile"
 fi
+IS_FISH=0
+[ "$_current_shell" = "fish" ] && IS_FISH=1
+unset _current_shell
 
 if [ "$BIN_IN_PATH" -eq 0 ]; then
     if [ -n "$SHELL_RC" ]; then
         if ! grep -q '\.local/bin' "$SHELL_RC" 2>/dev/null; then
             echo '' >> "$SHELL_RC"
             echo '# vibe-local' >> "$SHELL_RC"
-            echo 'export PATH="${HOME}/.local/bin:${PATH}"' >> "$SHELL_RC"
+            if [ "$IS_FISH" -eq 1 ]; then
+                echo 'set -gx PATH $HOME/.local/bin $PATH' >> "$SHELL_RC"
+            else
+                echo 'export PATH="${HOME}/.local/bin:${PATH}"' >> "$SHELL_RC"
+            fi
             vapor_success "$(msg path_added) → $SHELL_RC"
         else
             vapor_success "$(msg path_set)"
@@ -1064,8 +1091,12 @@ if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
     fi
 fi
 
-# テンポラリログ削除
+# テンポラリログ削除 (成功時のみ — 失敗時はデバッグ用に残す)
+# Note: cleanup trap handles EXIT/INT/TERM anyway
 rm -f "$SPINNER_LOG"
+
+# If we reach here, install succeeded — update cleanup to not warn
+_INSTALL_OK=1
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  🎆  Ｃ Ｏ Ｍ Ｐ Ｌ Ｅ Ｔ Ｅ !!                         ║

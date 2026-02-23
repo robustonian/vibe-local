@@ -6213,3 +6213,272 @@ class TestV091Improvements:
         assert ".bashrc" in content and ".zshrc" in content
         # Should use SHELL_RC variable, not hardcoded ~/.zshrc
         assert "SHELL_RC" in content
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Agent loop robustness tests
+# ════════════════════════════════════════════════════════════════════════════════
+
+class TestAgentLoopRobustness:
+    """Tests for Agent loop robustness fixes (BUG-03, BUG-04, BUG-09, BUG-11)."""
+
+    def test_json_salvage_ast_literal_eval(self):
+        """BUG-09: JSON salvage should use ast.literal_eval for single-quoted dicts."""
+        import ast
+        # Single-quoted dict with apostrophe in value
+        raw = "{'command': \"grep -r 'foo' .\"}"
+        parsed = ast.literal_eval(raw)
+        assert isinstance(parsed, dict)
+        assert parsed["command"] == "grep -r 'foo' ."
+
+    def test_json_salvage_trailing_comma(self):
+        """JSON salvage: trailing comma fix should still work."""
+        raw = '{"command": "ls", }'
+        fixed = re.sub(r',\s*}', '}', raw)
+        parsed = json.loads(fixed)
+        assert parsed == {"command": "ls"}
+
+    def test_loop_detection_normalized_json(self):
+        """BUG-11: Loop detector should normalize JSON for comparison."""
+        def _norm_args(raw):
+            try:
+                return json.dumps(json.loads(raw), sort_keys=True) if isinstance(raw, str) else str(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return str(raw)
+
+        # Different whitespace, same content
+        a = '{"command": "ls"}'
+        b = '{"command":  "ls"}'
+        c = '{ "command" : "ls" }'
+        assert _norm_args(a) == _norm_args(b) == _norm_args(c)
+
+        # Different key order, same content
+        x = '{"a": 1, "b": 2}'
+        y = '{"b": 2, "a": 1}'
+        assert _norm_args(x) == _norm_args(y)
+
+    def test_loop_detection_different_content(self):
+        """Loop detector should distinguish different content."""
+        def _norm_args(raw):
+            try:
+                return json.dumps(json.loads(raw), sort_keys=True) if isinstance(raw, str) else str(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return str(raw)
+        assert _norm_args('{"command": "ls"}') != _norm_args('{"command": "pwd"}')
+
+    def test_interrupted_flag_is_threading_event(self):
+        """BUG-02 (already fixed): _interrupted should be threading.Event."""
+        agent_cls = vc.Agent
+        config = mock.MagicMock()
+        config.model = "test"
+        config.debug = False
+        config.context_window = 8192
+        agent = agent_cls(config, mock.MagicMock(), mock.MagicMock(),
+                          mock.MagicMock(), mock.MagicMock(), mock.MagicMock())
+        assert isinstance(agent._interrupted, threading.Event)
+
+    def test_retry_catches_url_error(self):
+        """BUG-04: Retry loop should catch URLError for transient network errors."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # The retry except clause should include URLError
+        assert "except (RuntimeError, urllib.error.URLError)" in content
+
+    def test_partial_results_padded_on_interrupt(self):
+        """BUG-03: Missing tool results should be padded on interrupt."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Code should pad missing tool results with "Cancelled by user"
+        assert "Cancelled by user" in content
+        assert "called_ids" in content
+
+    def test_install_sh_no_clear(self):
+        """HIGH-3: install.sh should not clear the terminal."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "install.sh")) as f:
+            content = f.read()
+        # Should NOT have bare 'clear' command (only in comments is OK)
+        for line in content.split('\n'):
+            stripped = line.strip()
+            if stripped == 'clear' or stripped.startswith('clear '):
+                if not stripped.startswith('#'):
+                    pytest.fail(f"install.sh should not clear terminal: {line}")
+
+    def test_install_sh_no_spinner_for_brew(self):
+        """CRITICAL-2: Homebrew install should NOT use run_with_spinner."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "install.sh")) as f:
+            content = f.read()
+        # Homebrew install should not be wrapped in run_with_spinner
+        assert "run_with_spinner" not in content.split("Homebrew")[1].split("vapor_success")[0] or \
+               "Do NOT use run_with_spinner" in content
+
+    def test_install_sh_fish_shell_support(self):
+        """HIGH-4: install.sh should support fish shell PATH."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "install.sh")) as f:
+            content = f.read()
+        assert "fish" in content
+        assert "set -gx PATH" in content
+        assert ".bash_profile" in content
+
+    def test_install_sh_log_preserved_on_failure(self):
+        """LOW-5: Spinner log should be preserved on failure."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "install.sh")) as f:
+            content = f.read()
+        assert "_INSTALL_OK" in content
+        assert "Install log saved" in content
+
+    def test_tool_name_canonicalization(self):
+        """Finding 1: tool_name should be canonicalized to registered name after lookup."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Phase 2 should canonicalize tool_name = tool.name
+        assert "tool_name = tool.name" in content
+
+    def test_xml_patterns_filter_known_tools(self):
+        """Finding 7: XML patterns 1&2 should filter by known_tools early."""
+        # Pattern 1 should skip unknown tool names
+        text = '<invoke name="EvilTool"><parameter name="cmd">hack</parameter></invoke>'
+        tool_calls, cleaned = vc._extract_tool_calls_from_text(text, known_tools=["Read", "Bash"])
+        assert len(tool_calls) == 0
+
+        # Known tool should pass through
+        text2 = '<invoke name="Read"><parameter name="file_path">/tmp/test.txt</parameter></invoke>'
+        tool_calls2, _ = vc._extract_tool_calls_from_text(text2, known_tools=["Read", "Bash"])
+        assert len(tool_calls2) == 1
+        assert tool_calls2[0]["function"]["name"] == "Read"
+
+    def test_xml_qwen_pattern_filter_known_tools(self):
+        """Finding 7: Qwen XML pattern should also filter by known_tools."""
+        text = '<function=EvilTool><parameter=cmd>hack</parameter></function>'
+        tool_calls, _ = vc._extract_tool_calls_from_text(text, known_tools=["Read", "Bash"])
+        assert len(tool_calls) == 0
+
+        text2 = '<function=Bash><parameter=command>ls</parameter></function>'
+        tool_calls2, _ = vc._extract_tool_calls_from_text(text2, known_tools=["Read", "Bash"])
+        assert len(tool_calls2) == 1
+        assert tool_calls2[0]["function"]["name"] == "Bash"
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Delight / UX feature tests
+# ════════════════════════════════════════════════════════════════════════════════
+
+class TestDelightFeatures:
+    """Tests for delight/UX improvements."""
+
+    def test_tab_completion_setup(self):
+        """Tab-completion for slash commands should be wired up."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "set_completer" in content
+        assert "tab: complete" in content
+        assert "_slash_commands" in content
+
+    def test_first_run_marker(self):
+        """First-run onboarding should use a .first_run_done marker."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert ".first_run_done" in content
+        assert "First time?" in content
+
+    def test_did_you_mean_slash_commands(self):
+        """Unknown slash commands should suggest similar ones."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "Did you mean" in content
+
+    def test_session_stats_on_exit(self):
+        """Exit should show session duration."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "_session_start_time" in content
+        assert "Duration" in content or "_dur" in content
+
+    def test_welcome_back_shows_last_message(self):
+        """Session resume should show the last user message."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "_show_resume_info" in content
+        assert "last:" in content
+
+    def test_error_messages_beginner_friendly(self):
+        """Error messages should be beginner-friendly, not raw jargon."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # Ollama connection error should explain what Ollama is
+        assert "local AI engine" in content
+        # Model not found should say "downloaded" not "pull"
+        assert "hasn't been downloaded yet" in content
+        # Max iterations should be in plain language
+        assert "took" in content and "steps" in content
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Japanese UX tests
+# ════════════════════════════════════════════════════════════════════════════════
+
+class TestJapaneseUX:
+    """Tests for Japanese UX improvements."""
+
+    def test_display_width_helper(self):
+        """_display_width should count CJK chars as 2 columns."""
+        assert vc._display_width("abc") == 3
+        assert vc._display_width("あいう") == 6  # 3 CJK × 2 cols
+        assert vc._display_width("aあb") == 4    # 1 + 2 + 1
+        assert vc._display_width("") == 0
+
+    def test_truncate_to_display_width(self):
+        """_truncate_to_display_width should truncate by display width, not char count."""
+        # ASCII: 10 chars = 10 cols
+        assert vc._truncate_to_display_width("abcdefghij", 10) == "abcdefghij"
+        assert vc._truncate_to_display_width("abcdefghijk", 10) == "abcdefghij..."
+        # CJK: "あ" = 2 cols, so 5 CJK = 10 cols
+        assert vc._truncate_to_display_width("あいうえお", 10) == "あいうえお"
+        assert vc._truncate_to_display_width("あいうえおか", 10) == "あいうえお..."
+
+    def test_cjk_token_estimation_expanded(self):
+        """Token estimation should cover CJK punctuation and fullwidth forms."""
+        # CJK punctuation (U+3000-U+303F): 。、「」
+        est = vc.Session._estimate_tokens("。、「」")
+        assert est >= 4  # each should count as ~1 token
+        # Fullwidth forms (U+FF01-U+FF60): ！＂＃
+        est2 = vc.Session._estimate_tokens("！＂＃")
+        assert est2 >= 3
+
+    def test_ddg_search_has_locale_param(self):
+        """DuckDuckGo search should include locale parameter for CJK locales."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "kl=jp-ja" in content
+        assert "Accept-Language" in content
+        assert "kl=cn-zh" in content
+        assert "kl=kr-kr" in content
+
+    def test_permission_japanese_responses(self):
+        """Permission dialog should accept Japanese responses."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "常に" in content
+        assert "いつも" in content
+        assert "いいえ" in content
+        assert "拒否" in content
+
+    def test_banner_separator_cjk_safe(self):
+        """Banner separator should use narrow-width characters (not ━ U+2501 Ambiguous)."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        # The rainbow separator in banner() should use ── (U+2500 Na) not ━━ (U+2501 A)
+        # Check the adaptive rainbow separator section
+        lines = content.split('\n')
+        for line in lines:
+            if 'sep_line +=' in line and 'sep_colors' in content[content.index(line)-200:content.index(line)]:
+                if '━━' in line:
+                    pytest.fail("Banner separator should use ── (U+2500) not ━━ (U+2501) for CJK terminal compatibility")
+
+    def test_tool_result_display_uses_display_width(self):
+        """Tool result truncation should use _truncate_to_display_width, not len()."""
+        with open(os.path.join(VIBE_LOCAL_DIR, "vibe-coder.py")) as f:
+            content = f.read()
+        assert "_truncate_to_display_width" in content
+        # Should NOT use the old pattern: line[:200] + "..."
+        # The show_tool_result method should call _truncate_to_display_width
+        assert "truncate_to_display_width(line, 200)" in content

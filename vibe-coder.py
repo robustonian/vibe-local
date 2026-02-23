@@ -131,6 +131,27 @@ def _get_terminal_width():
         return 80
 
 
+def _display_width(text):
+    """Calculate terminal display width accounting for CJK double-width characters."""
+    w = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        w += 2 if eaw in ('W', 'F') else 1
+    return w
+
+
+def _truncate_to_display_width(text, max_width):
+    """Truncate text to fit within max_width terminal columns."""
+    w = 0
+    for i, ch in enumerate(text):
+        eaw = unicodedata.east_asian_width(ch)
+        cw = 2 if eaw in ('W', 'F') else 1
+        if w + cw > max_width:
+            return text[:i] + "..."
+        w += cw
+    return text
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # Config
 # ════════════════════════════════════════════════════════════════════════════════
@@ -642,6 +663,7 @@ class OllamaClient:
         self.base_url = config.ollama_host
         self.max_tokens = config.max_tokens
         self.temperature = config.temperature
+        self.context_window = config.context_window
         self.debug = config.debug
         self.timeout = 300
 
@@ -742,6 +764,7 @@ class OllamaClient:
             "temperature": self.temperature,
             "stream": stream,
             "keep_alive": -1,  # Keep model loaded in VRAM for the session
+            "options": {"num_ctx": self.context_window},  # Tell Ollama our context budget
         }
         if tools:
             payload["tools"] = tools
@@ -1173,7 +1196,7 @@ class BashTool(Tool):
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
-                return f"Error: command timed out after {int(timeout_s)}s"
+                return f"Error: command took too long (over {int(timeout_s)}s) and was stopped. Try a faster approach or increase --timeout."
             output = ""
             if stdout:
                 output += stdout
@@ -2195,11 +2218,29 @@ class WebSearchTool(Tool):
 
     def _ddg_search(self, query, max_results=8):
         """Search DuckDuckGo HTML endpoint. Zero dependencies (stdlib only)."""
-        search_url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+        # Detect CJK locale for DDG region parameter
+        _ddg_locale = ""
+        _accept_lang = "en-US,en;q=0.9"
+        try:
+            import locale
+            _loc = (locale.getlocale()[0] or os.environ.get("LANG", "")).lower()
+        except Exception:
+            _loc = os.environ.get("LANG", "").lower()
+        if "ja" in _loc:
+            _ddg_locale = "&kl=jp-ja"
+            _accept_lang = "ja,en;q=0.9"
+        elif "zh" in _loc:
+            _ddg_locale = "&kl=cn-zh"
+            _accept_lang = "zh,en;q=0.9"
+        elif "ko" in _loc:
+            _ddg_locale = "&kl=kr-kr"
+            _accept_lang = "ko,en;q=0.9"
+        search_url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query) + _ddg_locale
         req = urllib.request.Request(search_url, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/133.0.0.0 Safari/537.36",
+            "Accept-Language": _accept_lang,
         })
         try:
             resp = urllib.request.urlopen(req, timeout=30)
@@ -3102,6 +3143,9 @@ def _extract_tool_calls_from_text(text, known_tools=None):
     for m in invoke_pat.finditer(search_text):
         # Issue #3: strip whitespace from tool names
         tool_name = m.group(1).strip()
+        # Early filter: skip tool names not in known set (defense-in-depth)
+        if known_tools and tool_name not in known_tools:
+            continue
         params_text = m.group(2)
         params = {}
         for pm in param_pat.finditer(params_text):
@@ -3131,6 +3175,9 @@ def _extract_tool_calls_from_text(text, known_tools=None):
     for m in qwen_func_pat.finditer(search_text):
         # Issue #3: strip whitespace from tool names
         tool_name = m.group(1).strip()
+        # Early filter: skip tool names not in known set (defense-in-depth)
+        if known_tools and tool_name not in known_tools:
+            continue
         params_text = m.group(2)
         params = {}
         for pm in qwen_param_pat.finditer(params_text):
@@ -3287,7 +3334,11 @@ class Session:
         if not text:
             return 0
         cjk_count = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff'
-                        or '\u3040' <= ch <= '\u30ff'  # hiragana/katakana
+                        or '\u3400' <= ch <= '\u4dbf'   # CJK ext-A
+                        or '\u3040' <= ch <= '\u30ff'   # hiragana/katakana
+                        or '\u3000' <= ch <= '\u303f'   # CJK symbols/punctuation
+                        or '\u31f0' <= ch <= '\u31ff'   # katakana ext
+                        or '\uff01' <= ch <= '\uff60'   # fullwidth forms
                         or '\uac00' <= ch <= '\ud7af')  # korean
         non_cjk = len(text) - cjk_count
         return cjk_count + non_cjk // 4
@@ -3702,6 +3753,22 @@ class TUI:
                 if os.path.isfile(config.history_file):
                     readline.read_history_file(config.history_file)
                 readline.set_history_length(1000)
+                # Tab-completion for slash commands
+                _slash_commands = [
+                    "/help", "/exit", "/quit", "/q", "/clear", "/model",
+                    "/status", "/save", "/compact", "/yes", "/no", "/tokens",
+                    "/commit", "/diff", "/git", "/plan", "/undo", "/init",
+                    "/config", "/debug",
+                ]
+                def _completer(text, state):
+                    if text.startswith("/"):
+                        options = [c for c in _slash_commands if c.startswith(text)]
+                    else:
+                        options = []
+                    return options[state] if state < len(options) else None
+                readline.set_completer(_completer)
+                readline.set_completer_delims(" \t\n")
+                readline.parse_and_bind("tab: complete")
             except Exception:
                 pass
 
@@ -3745,13 +3812,13 @@ class TUI:
         print(f"  {_ansi(chr(27)+'[38;5;87m')}v{__version__}{C.RESET}  "
               f"{C.DIM}// No login • No cloud • Fully OSS • Powered by Ollama{C.RESET}")
 
-        # Adaptive rainbow separator
+        # Adaptive rainbow separator (use ── U+2500 Na width, safe for CJK terminals)
         sep_colors = [198, 199, 200, 201, 165, 129, 93, 57, 51, 45, 39, 33, 27, 33, 39, 45, 51, 57, 93, 129, 165, 201, 200, 199]
         max_pairs = min(len(sep_colors), (term_w - 4) // 2)
         sep_line = "  "
         for i in range(max_pairs):
             c = sep_colors[i % len(sep_colors)]
-            sep_line += f"{_ansi(chr(27)+f'[38;5;{c}m')}━━"
+            sep_line += f"{_ansi(chr(27)+f'[38;5;{c}m')}──"
         sep_line += C.RESET
         print(sep_line)
 
@@ -3770,8 +3837,8 @@ class TUI:
         print(f"  📁 {info_dim}CWD{C.RESET}    {C.WHITE}{os.getcwd()}{C.RESET}")
 
         if not model_ok:
-            print(f"\n  {C.RED}⚠ Model not found.{C.RESET}")
-            print(f"  {C.DIM}  Fix: ollama pull {config.model}{C.RESET}")
+            print(f"\n  {C.RED}⚠ Model '{config.model}' not downloaded yet.{C.RESET}")
+            print(f"  {C.DIM}  Download it:  ollama pull {config.model}{C.RESET}")
 
         print(sep_line)
         # Recommend -y mode if not already enabled
@@ -3988,9 +4055,11 @@ class TUI:
                 in_code_block = not in_code_block
                 if in_code_block:
                     lang = line[3:].strip()
-                    print(f"\n{C.DIM}{'─' * 40} {lang}{C.RESET}")
+                    sep_w = min(40, _get_terminal_width() - 6)
+                    print(f"\n{C.DIM}{'─' * sep_w} {lang}{C.RESET}")
                 else:
-                    print(f"{C.DIM}{'─' * 40}{C.RESET}")
+                    sep_w = min(40, _get_terminal_width() - 6)
+                    print(f"{C.DIM}{'─' * sep_w}{C.RESET}")
                 continue
 
             if in_code_block:
@@ -4124,16 +4193,16 @@ class TUI:
         if len(lines) <= max_show:
             for line in lines:
                 # Truncate very long lines for display
-                display = line[:200] + "..." if len(line) > 200 else line
+                display = _truncate_to_display_width(line, 200)
                 print(f"{marker} {color}{display}{C.RESET}")
         else:
             for line in lines[:6]:
-                display = line[:200] + "..." if len(line) > 200 else line
+                display = _truncate_to_display_width(line, 200)
                 print(f"{marker} {color}{display}{C.RESET}")
             remaining = len(lines) - 9
             print(f"{marker} {_ansi(chr(27)+'[38;5;245m')}  ↕ {remaining} more lines{C.RESET}")
             for line in lines[-3:]:
-                display = line[:200] + "..." if len(line) > 200 else line
+                display = _truncate_to_display_width(line, 200)
                 print(f"{marker} {color}{display}{C.RESET}")
 
     def ask_permission(self, tool_name, params):
@@ -4155,11 +4224,12 @@ class TUI:
         # Box-style permission prompt
         _y = _ansi("\033[38;5;226m")
         _w = _ansi("\033[38;5;255m")
-        print(f"\n  {_y}╭─ Permission Required ──────────────────────{C.RESET}")
+        box_w = min(46, _get_terminal_width() - 6)
+        print(f"\n  {_y}╭─ Permission Required {'─' * max(0, box_w - 23)}{C.RESET}")
         print(f"  {_y}│{C.RESET} {color}{icon} {tool_name}{C.RESET}")
         if detail:
             # Show full detail, wrapping if needed
-            max_w = 60
+            max_w = max(30, box_w - 4)
             if len(detail) <= max_w:
                 print(f"  {_y}│{C.RESET} {_w}{detail}{C.RESET}")
             else:
@@ -4169,7 +4239,7 @@ class TUI:
         print(f"  {_y}│{C.RESET}")
         print(f"  {_y}│{C.RESET}  [y] Allow once   [a] Allow all {tool_name} this session")
         print(f"  {_y}│{C.RESET}  [n] Deny (Enter)  [d] Deny all   [Y] Approve everything")
-        print(f"  {_y}╰──────────────────────────────────────────────{C.RESET}")
+        print(f"  {_y}╰{'─' * box_w}{C.RESET}")
         try:
             reply = input(f"  {_y}? {C.RESET}").strip()
         except (EOFError, KeyboardInterrupt):
@@ -4181,9 +4251,9 @@ class TUI:
             return "yes_mode"
         elif reply_lower in ("y", "yes", "はい"):
             return True
-        elif reply_lower in ("a", "all", "always"):
+        elif reply_lower in ("a", "all", "always", "常に", "いつも"):
             return "allow_all"
-        elif reply_lower in ("d", "deny"):
+        elif reply_lower in ("d", "deny", "いいえ", "拒否"):
             return "deny_all"
         else:
             return False
@@ -4378,17 +4448,20 @@ class Agent:
                             stream=not bool(tools),  # stream only when no tools
                         )
                         break
-                    except RuntimeError as e:
+                    except (RuntimeError, urllib.error.URLError) as e:
                         last_error = e
                         if retry < self.MAX_RETRIES:
-                            time.sleep(1)
+                            if self.config.debug:
+                                print(f"{C.DIM}[debug] Retry {retry+1}/{self.MAX_RETRIES}: {e}{C.RESET}", file=sys.stderr)
+                            time.sleep(1 + retry)  # increasing backoff
                             continue
                         raise
 
                 self.tui.stop_spinner()
 
                 if response is None:
-                    print(f"\n{C.RED}Error: No response from Ollama{C.RESET}")
+                    print(f"\n{C.RED}The AI didn't respond. It may still be loading or ran out of memory.{C.RESET}")
+                    print(f"{C.DIM}Try again, or restart Ollama if this keeps happening.{C.RESET}")
                     break
 
                 # 2. Parse response
@@ -4426,7 +4499,8 @@ class Agent:
                 if not text and not tool_calls and iteration < self.MAX_ITERATIONS - 1:
                     _empty_retries += 1
                     if _empty_retries > 3:
-                        print(f"\n{C.YELLOW}Model returned empty responses. Try a different model or prompt.{C.RESET}")
+                        print(f"\n{C.YELLOW}The AI returned empty responses (the model may be overloaded or incompatible).{C.RESET}")
+                        print(f"{C.DIM}Try rephrasing, or switch models with: /model <name>{C.RESET}")
                         break
                     if self.config.debug:
                         print(f"{C.DIM}[debug] Empty response (retry {_empty_retries}/3), backing off...{C.RESET}", file=sys.stderr)
@@ -4441,14 +4515,21 @@ class Agent:
                     break
 
                 # 5. Detect infinite tool call loops
+                def _norm_args(raw):
+                    """Normalize JSON args so whitespace/key-order variations don't evade loop detection."""
+                    try:
+                        return json.dumps(json.loads(raw), sort_keys=True) if isinstance(raw, str) else str(raw)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        return str(raw)
                 current_calls = [(tc.get("function", {}).get("name", ""),
-                                  tc.get("function", {}).get("arguments", ""))
+                                  _norm_args(tc.get("function", {}).get("arguments", "")))
                                  for tc in tool_calls]
                 _recent_tool_calls.append(current_calls)
                 if len(_recent_tool_calls) >= self.MAX_SAME_TOOL_REPEAT:
                     recent = _recent_tool_calls[-self.MAX_SAME_TOOL_REPEAT:]
                     if all(r == recent[0] for r in recent):
-                        print(f"\n{C.YELLOW}Detected repeated tool calls. Stopping loop.{C.RESET}")
+                        print(f"\n{C.YELLOW}The AI got stuck repeating the same action. Stopped.{C.RESET}")
+                        print(f"{C.DIM}Try rephrasing your request or asking for a different approach.{C.RESET}")
                         break
                 if len(_recent_tool_calls) > 10:
                     _recent_tool_calls = _recent_tool_calls[-10:]
@@ -4469,14 +4550,20 @@ class Agent:
                     except json.JSONDecodeError:
                         # Local LLMs sometimes produce broken JSON - try to salvage
                         try:
-                            fixed = raw_args.replace("'", '"')
-                            fixed = re.sub(r',\s*}', '}', fixed)
-                            fixed = re.sub(r',\s*]', ']', fixed)
-                            tool_params = json.loads(fixed)
-                        except (json.JSONDecodeError, Exception):
-                            # Unsalvageable JSON — report error to LLM instead of passing bad params
-                            results.append(ToolResult(tc_id, f"Error: tool arguments are not valid JSON: {raw_args[:200]}", True))
-                            continue
+                            # Try Python dict literal first (handles single quotes safely)
+                            import ast
+                            parsed = ast.literal_eval(raw_args)
+                            tool_params = parsed if isinstance(parsed, dict) else {"raw": str(parsed)}
+                        except (ValueError, SyntaxError):
+                            # Fallback: fix trailing commas, then try JSON again
+                            try:
+                                fixed = re.sub(r',\s*}', '}', raw_args)
+                                fixed = re.sub(r',\s*]', ']', fixed)
+                                tool_params = json.loads(fixed)
+                            except (json.JSONDecodeError, Exception):
+                                # Unsalvageable — report error to LLM instead of passing bad params
+                                results.append(ToolResult(tc_id, f"Error: tool arguments are not valid JSON: {raw_args[:200]}", True))
+                                continue
                     parsed_calls.append((tc_id, tool_name, tool_params))
 
                 # Phase 2: Validate permissions on main thread
@@ -4486,6 +4573,9 @@ class Agent:
                     if not tool:
                         results.append(ToolResult(tc_id, f"Error: unknown tool '{tool_name}'", True))
                         continue
+                    # Canonicalize tool_name to registered name (defense-in-depth
+                    # against case variations like "bash" vs "Bash")
+                    tool_name = tool.name
                     # Show what we're about to do FIRST
                     self.tui.show_tool_call(tool_name, tool_params)
                     # Then ask permission
@@ -4565,6 +4655,14 @@ class Agent:
                             results.append(ToolResult(tc_id, error_msg, True))
 
                 # 6. Add tool results to history
+                # If interrupted mid-tool-loop, pad missing results so the
+                # session stays valid (assistant.tool_calls must match tool results).
+                if self._interrupted.is_set():
+                    called_ids = {r.id for r in results}
+                    for tc in tool_calls:
+                        tid = tc.get("id", "")
+                        if tid and tid not in called_ids:
+                            results.append(ToolResult(tid, "Cancelled by user", True))
                 self.session.add_tool_results(results)
 
                 # Skip compaction if interrupted — just save partial results and break
@@ -4603,9 +4701,10 @@ class Agent:
                     pass
                 print(f"\n{C.RED}HTTP {e.code} {e.reason}: {body}{C.RESET}")
                 if e.code == 404:
-                    print(f"{C.DIM}Model '{self.config.model}' not found? Run: ollama pull {self.config.model}{C.RESET}")
+                    print(f"{C.DIM}The model '{self.config.model}' may not be downloaded yet.{C.RESET}")
+                    print(f"{C.DIM}Download it:  ollama pull {self.config.model}{C.RESET}")
                 elif e.code == 400:
-                    print(f"{C.DIM}Bad request — check model name and parameters{C.RESET}")
+                    print(f"{C.DIM}The request was rejected — the model name or context may be invalid.{C.RESET}")
                 break
             except urllib.error.URLError as e:
                 self.tui.stop_spinner()
@@ -4613,8 +4712,9 @@ class Agent:
                     response.close()
                 if text:
                     self.session.add_assistant_message(text)
-                print(f"\n{C.RED}Connection error: {e}{C.RESET}")
-                print(f"{C.DIM}Is Ollama running? Check: curl {self.config.ollama_host}/api/tags{C.RESET}")
+                print(f"\n{C.RED}Lost connection to Ollama (the local AI engine).{C.RESET}")
+                print(f"{C.DIM}It may have crashed or been closed. Restart it:  ollama serve{C.RESET}")
+                print(f"{C.DIM}Your conversation is still here — just try again after restarting.{C.RESET}")
                 break
             except Exception as e:
                 self.tui.stop_spinner()
@@ -4622,16 +4722,17 @@ class Agent:
                     response.close()
                 if text:
                     self.session.add_assistant_message(text)
-                print(f"\n{C.RED}Error ({type(e).__name__}): {e}{C.RESET}")
+                print(f"\n{C.RED}Something went wrong: {e}{C.RESET}")
+                print(f"{C.DIM}Your conversation is still active. Try your request again.{C.RESET}")
                 if self.config.debug:
                     traceback.print_exc()
                 else:
-                    print(f"{C.DIM}(Run with --debug for full traceback){C.RESET}")
+                    print(f"{C.DIM}(Run with --debug for full details){C.RESET}")
                 break
         else:
-            print(f"\n{C.YELLOW}Reached max iterations ({self.MAX_ITERATIONS}). Stopping.{C.RESET}")
-            print(f"{C.DIM}The conversation may need to be broken into smaller steps.{C.RESET}")
-            print(f"{C.DIM}Try: /compact to free context, then continue.{C.RESET}")
+            print(f"\n{C.YELLOW}The AI took {self.MAX_ITERATIONS} steps without finishing.{C.RESET}")
+            print(f"{C.DIM}Your work so far is saved. Try breaking the task into smaller steps,{C.RESET}")
+            print(f"{C.DIM}or type /compact to free up context and continue.{C.RESET}")
 
     def interrupt(self):
         self._interrupted.set()
@@ -4665,11 +4766,11 @@ def main():
     client = OllamaClient(config)
     ok, models = client.check_connection()
     if not ok:
-        print(f"{C.RED}Error: Cannot connect to Ollama at {config.ollama_host}{C.RESET}")
+        print(f"\n{C.RED}Ollama (the local AI engine) is not running.{C.RESET}")
         if platform.system() == "Darwin":
-            print(f"{C.DIM}Make sure Ollama is running (check the llama icon in your menu bar).{C.RESET}")
+            print(f"{C.DIM}Look for the llama icon in your menu bar, or open the Ollama app.{C.RESET}")
         else:
-            print(f"{C.DIM}Make sure Ollama is running: ollama serve{C.RESET}")
+            print(f"{C.DIM}Start it by running this in another terminal:  ollama serve{C.RESET}")
         # Try to auto-start Ollama on macOS and Linux
         if shutil.which("ollama"):
             try:
@@ -4713,27 +4814,30 @@ def main():
     model_ok = client.check_model(config.model, available_models=models)
 
     if not model_ok:
-        print(f"\n{C.YELLOW}Model '{config.model}' not found in Ollama.{C.RESET}")
-        print(f"{C.DIM}Available models: {', '.join(models) if models else '(none)'}{C.RESET}")
+        print(f"\n{C.YELLOW}The AI model '{config.model}' hasn't been downloaded yet.{C.RESET}")
+        if models:
+            print(f"{C.DIM}Models already downloaded: {', '.join(models)}{C.RESET}")
+        else:
+            print(f"{C.DIM}No models downloaded yet.{C.RESET}")
         do_pull = False
         if config.yes_mode:
             do_pull = True
         else:
             try:
-                ans = input(f"{C.CYAN}Pull '{config.model}' now? [Y/n]: {C.RESET}").strip().lower()
+                ans = input(f"{C.CYAN}Download '{config.model}' now? (may be several GB) [Y/n]: {C.RESET}").strip().lower()
                 do_pull = ans in ("", "y", "yes")
             except (EOFError, KeyboardInterrupt):
                 print()
         if do_pull:
-            print(f"{C.CYAN}Pulling {config.model}...{C.RESET}")
+            print(f"{C.CYAN}Downloading {config.model}... (this may take a few minutes){C.RESET}")
             if client.pull_model(config.model):
-                print(f"{C.GREEN}Successfully pulled {config.model}{C.RESET}")
+                print(f"{C.GREEN}Download complete: {config.model}{C.RESET}")
                 model_ok = True
             else:
-                print(f"{C.RED}Failed to pull {config.model}{C.RESET}")
+                print(f"{C.RED}Download failed. Try manually:  ollama pull {config.model}{C.RESET}")
                 sys.exit(1)
         else:
-            print(f"{C.DIM}Continuing without verified model (may fail on first request).{C.RESET}")
+            print(f"{C.DIM}Skipping download. The AI may not work until the model is downloaded.{C.RESET}")
 
     # Setup components
     system_prompt = _build_system_prompt(config)
@@ -4750,16 +4854,30 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGINT, signal_handler)
 
+    # Helper: show last user message from session for "welcome back"
+    def _show_resume_info(label, msgs, pct, messages_list):
+        print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Welcome back! Resumed {label}{C.RESET}")
+        # Find last user message for context
+        last_user_msg = ""
+        for m in reversed(messages_list):
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                last_user_msg = m["content"].strip()[:80]
+                break
+        info = f"  {msgs} messages, {pct}% context used"
+        if last_user_msg:
+            info += f' | last: "{last_user_msg}"'
+        print(f"  {_ansi(chr(27)+'[38;5;240m')}{info}{C.RESET}\n")
+
     # Resume session if requested
     if config.resume:
         if config.session_id:
             if session.load(config.session_id):
                 msgs = len(session.messages)
                 pct = min(int((session.get_token_estimate() / config.context_window) * 100), 100)
-                print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Welcome back! Resumed session: {config.session_id}{C.RESET}")
-                print(f"  {_ansi(chr(27)+'[38;5;240m')}  {msgs} messages, {pct}% context used{C.RESET}\n")
+                _show_resume_info(f"session: {config.session_id}", msgs, pct, session.messages)
             else:
-                print(f"{C.RED}Session not found: {config.session_id}{C.RESET}")
+                print(f"{C.RED}No saved session found with ID '{config.session_id}'.{C.RESET}")
+                print(f"{C.DIM}List sessions: python3 vibe-coder.py --list-sessions{C.RESET}")
                 return
         else:
             # First try to find a session for the current working directory
@@ -4769,8 +4887,7 @@ def main():
                 if session.load(project_sid):
                     msgs = len(session.messages)
                     pct = min(int((session.get_token_estimate() / config.context_window) * 100), 100)
-                    print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Welcome back! Resumed project session: {project_sid}{C.RESET}")
-                    print(f"  {_ansi(chr(27)+'[38;5;240m')}  {msgs} messages, {pct}% context used (project: {config.cwd}){C.RESET}\n")
+                    _show_resume_info(f"project session: {project_sid}", msgs, pct, session.messages)
                     resumed = True
             if not resumed:
                 # Fall back to latest session
@@ -4780,10 +4897,21 @@ def main():
                     if session.load(latest):
                         msgs = len(session.messages)
                         pct = min(int((session.get_token_estimate() / config.context_window) * 100), 100)
-                        print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Welcome back! Resumed: {latest}{C.RESET}")
-                        print(f"  {_ansi(chr(27)+'[38;5;240m')}  {msgs} messages, {pct}% context used{C.RESET}\n")
+                        _show_resume_info(latest, msgs, pct, session.messages)
                     else:
                         print(f"{C.YELLOW}Could not resume. Starting new session.{C.RESET}")
+
+    # First-run onboarding hint for new users
+    if not config.resume and not config.prompt:
+        first_run_marker = os.path.join(config.state_dir, ".first_run_done")
+        if not os.path.exists(first_run_marker):
+            _hint_color = _ansi(chr(27)+'[38;5;51m')
+            print(f"  {_hint_color}First time? Try typing: \"create a hello world in Python\"{C.RESET}")
+            print(f"  {_ansi(chr(27)+'[38;5;240m')}Type /help for commands, or just ask anything in natural language.{C.RESET}\n")
+            try:
+                open(first_run_marker, "w").close()
+            except OSError:
+                pass
 
     # One-shot mode
     if config.prompt:
@@ -4793,6 +4921,8 @@ def main():
 
     # Interactive mode
     _last_ctrl_c = [0.0]  # mutable container for closure
+    _session_start_time = time.time()
+    _session_start_msgs = len(session.messages)
 
     while True:
         try:
@@ -4808,10 +4938,12 @@ def main():
             _exit_words = {"exit", "exit;", "quit", "quit;", "bye", "bye;"}
             if user_input.strip().lower() in _exit_words:
                 session.save()
-                msgs = len(session.messages)
-                tokens = session.get_token_estimate()
-                print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Session saved ({msgs} messages, ~{tokens:,} tokens){C.RESET}")
-                print(f"  {_ansi(chr(27)+'[38;5;240m')}Resume anytime: python3 vibe-coder.py --resume{C.RESET}\n")
+                _elapsed = int(time.time() - _session_start_time)
+                _mins, _secs = divmod(_elapsed, 60)
+                _new_msgs = len(session.messages) - _session_start_msgs
+                _dur = f"{_mins}m {_secs}s" if _mins else f"{_secs}s"
+                print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Session saved. Duration: {_dur}, {_new_msgs} new messages.{C.RESET}")
+                print(f"  {_ansi(chr(27)+'[38;5;240m')}Resume anytime: vibe-local --resume{C.RESET}\n")
                 break
 
             # Handle commands
@@ -4878,9 +5010,9 @@ def main():
                             print(f"{C.GREEN}Switched to model: {new_model}{C.RESET}")
                         else:
                             avail = fresh_models if _ok else []
-                            print(f"{C.YELLOW}Model '{new_model}' not found in Ollama.{C.RESET}")
+                            print(f"{C.YELLOW}Model '{new_model}' is not downloaded yet.{C.RESET}")
                             print(f"{C.DIM}Available: {', '.join(avail)}{C.RESET}")
-                            print(f"{C.DIM}Pull it first: ollama pull {new_model}{C.RESET}")
+                            print(f"{C.DIM}Download it first:  ollama pull {new_model}{C.RESET}")
                     else:
                         _ok, fresh_models = client.check_connection()
                         avail = fresh_models if _ok else []
@@ -5217,7 +5349,18 @@ def main():
                     continue
 
                 else:
-                    print(f"{C.YELLOW}Unknown command. Type /help for available commands.{C.RESET}")
+                    # "Did you mean?" for typo'd slash commands
+                    _all_cmds = ["/help", "/exit", "/quit", "/clear", "/model",
+                                 "/status", "/save", "/compact", "/yes", "/no",
+                                 "/tokens", "/commit", "/diff", "/git", "/plan",
+                                 "/undo", "/init", "/config", "/debug"]
+                    _close = [c for c in _all_cmds if c.startswith(cmd[:3])] if len(cmd) >= 3 else []
+                    if not _close:
+                        _close = [c for c in _all_cmds if cmd[1:] in c] if len(cmd) > 1 else []
+                    if _close:
+                        print(f"{C.YELLOW}Unknown command '{cmd}'. Did you mean: {', '.join(_close[:3])}?{C.RESET}")
+                    else:
+                        print(f"{C.YELLOW}Unknown command. Type /help for available commands.{C.RESET}")
                     continue
 
             # Run agent
@@ -5230,7 +5373,10 @@ def main():
             if now - _last_ctrl_c[0] < 1.5:
                 # Double Ctrl+C within 1.5s → exit
                 session.save()
-                print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Session saved. Goodbye! ✦{C.RESET}")
+                _elapsed = int(time.time() - _session_start_time)
+                _mins, _secs = divmod(_elapsed, 60)
+                _dur = f"{_mins}m {_secs}s" if _mins else f"{_secs}s"
+                print(f"\n  {_ansi(chr(27)+'[38;5;51m')}✦ Session saved ({_dur}). Goodbye! ✦{C.RESET}")
                 break
             _last_ctrl_c[0] = now
             print(f"\n{C.DIM}(Ctrl+C again within 1.5s to exit, or type /exit){C.RESET}")

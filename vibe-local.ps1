@@ -10,12 +10,12 @@
 #   vibe-local --auto                # Auto-detect network
 #   vibe-local --model qwen3:8b      # Manual model
 #   vibe-local -y                    # Skip permission check
-#   vibe-local --debug               # Debug mode
+#   vibe-local -DebugMode             # Debug mode
 
 param(
     [switch]$Auto,
     [switch]$Yes,
-    [switch]$Debug,
+    [switch]$DebugMode,
     [string]$Model,
     [Parameter(ValueFromRemainingArguments)]
     [string[]]$ExtraArgs
@@ -53,7 +53,7 @@ if (Test-Path $ConfigFile) {
 
 # Command line overrides
 if ($Model) { $CfgModel = $Model }
-if ($Debug) { $VibeLocalDebug = 1 }
+if ($DebugMode) { $VibeLocalDebug = 1 }
 
 # [SEC] Validate OLLAMA_HOST - only allow localhost (SSRF prevention)
 $ollamaUri = [System.Uri]::new($OllamaHost)
@@ -99,32 +99,61 @@ if (-not $PythonCmd) {
 }
 
 # --- Ensure Ollama is running ---
-function Ensure-Ollama {
+function Test-OllamaRunning {
+    # Use Invoke-WebRequest instead of Invoke-RestMethod for more robust detection
+    # Invoke-RestMethod can fail on non-JSON responses; Invoke-WebRequest checks HTTP status
     try {
-        $null = Invoke-RestMethod -Uri "$OllamaHost/api/tags" -TimeoutSec 2 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri "$OllamaHost/api/tags" -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        return ($resp.StatusCode -eq 200)
+    } catch {
+        # Fallback: try TCP connection to the port directly
+        try {
+            $uri = [System.Uri]::new($OllamaHost)
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $tcp.Connect($uri.Host, $uri.Port)
+            $tcp.Close()
+            return $true
+        } catch {
+            return $false
+        }
+    }
+}
+
+function Ensure-Ollama {
+    # First check: is Ollama already running?
+    if (Test-OllamaRunning) {
         return $true
-    } catch {}
+    }
+
+    # Not running — check if ollama command exists
+    $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+    if (-not $ollamaCmd) {
+        Write-Host "Error: Ollama is not installed." -ForegroundColor Red
+        Write-Host "  Install it: winget install Ollama.Ollama"
+        Write-Host "  Or download from: https://ollama.com/download"
+        return $false
+    }
 
     Write-Host "Starting Ollama..." -ForegroundColor Cyan
     try {
         Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden -ErrorAction Stop
     } catch {
-        Write-Host "Error: Could not start Ollama. Make sure it's installed: winget install Ollama.Ollama" -ForegroundColor Red
+        Write-Host "Error: Could not start Ollama. Try running 'ollama serve' manually." -ForegroundColor Red
         return $false
     }
 
     for ($i = 1; $i -le 15; $i++) {
-        Write-Host "`r  Waiting for Ollama... ${i}s " -NoNewline
+        Write-Host "`r  Waiting for Ollama... $($i * 2)s " -NoNewline
         Start-Sleep -Seconds 2
-        try {
-            $null = Invoke-RestMethod -Uri "$OllamaHost/api/tags" -TimeoutSec 2 -ErrorAction Stop
+        if (Test-OllamaRunning) {
             Write-Host "`r                                    "
             Write-Host "Ollama started successfully" -ForegroundColor Green
             return $true
-        } catch {}
+        }
     }
     Write-Host ""
     Write-Host "Error: Ollama failed to start within 30 seconds" -ForegroundColor Red
+    Write-Host "  Try running 'ollama serve' in a separate terminal" -ForegroundColor Yellow
     return $false
 }
 
@@ -163,14 +192,23 @@ try {
     # Check model is available (if specified)
     if ($CfgModel) {
         try {
-            $tags = Invoke-RestMethod -Uri "$OllamaHost/api/tags" -TimeoutSec 5 -ErrorAction Stop
-            $modelFound = $tags.models | Where-Object { $_.name -eq $CfgModel }
+            $resp = Invoke-WebRequest -Uri "$OllamaHost/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            $tags = $resp.Content | ConvertFrom-Json
+            $modelNames = @($tags.models | ForEach-Object { $_.name })
+            $modelBase = ($CfgModel -split ':')[0]
+            $modelFound = $modelNames | Where-Object {
+                $_ -eq $CfgModel -or
+                $_ -eq "$CfgModel`:latest" -or
+                ($_ -split ':')[0] -eq $modelBase
+            }
             if (-not $modelFound) {
-                Write-Host "Error: Model '$CfgModel' not found" -ForegroundColor Red
-                Write-Host "  Run: ollama pull `"$CfgModel`""
+                Write-Host "Error: Model '$CfgModel' hasn't been downloaded yet." -ForegroundColor Red
                 Write-Host ""
-                Write-Host "Available models:"
-                foreach ($m in $tags.models) { Write-Host "  - $($m.name)" }
+                Write-Host "  Download it by running:"
+                Write-Host "    ollama pull `"$CfgModel`""
+                Write-Host ""
+                Write-Host "  Available models:" -ForegroundColor Cyan
+                foreach ($m in $modelNames) { Write-Host "    - $m" }
                 exit 1
             }
         } catch {
