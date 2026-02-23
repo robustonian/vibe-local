@@ -553,10 +553,14 @@ IMPORTANT — This is macOS (NOT Linux). Use these alternatives:
 IMPORTANT — This is Windows (NOT Linux/macOS):
 - Home directory: %USERPROFILE% (e.g. C:\\Users\\username)
 - Package manager: winget (NEVER apt, brew, yum)
-- Shell: PowerShell or cmd.exe
+- Shell: PowerShell (preferred) or cmd.exe
 - Paths use backslash: C:\\Users\\... (NEVER /home/)
-- Use: Get-ChildItem (dir), Get-Content (type), Remove-Item (del)
-- FORBIDDEN on Windows: apt, brew, /home/, /proc/, chmod
+- Environment vars: $env:VAR (PowerShell) or %VAR% (cmd)
+- List files: Get-ChildItem or ls (PowerShell)
+- Read files: Get-Content (PowerShell) or type (cmd)
+- Find in files: Select-String (PowerShell) — like grep
+- Processes: Get-Process (PowerShell) — like ps
+- FORBIDDEN on Windows: apt, brew, /home/, /proc/, chmod, chown
 """
 
     # Load project-specific instructions (.vibe-coder.json or CLAUDE.md)

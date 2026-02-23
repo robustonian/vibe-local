@@ -17,7 +17,7 @@ set -uo pipefail
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
         echo "Windows detected (Git Bash / MSYS2). Launching PowerShell installer..."
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo ".")"
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo ".")"
         if [ -f "${SCRIPT_DIR}/install.ps1" ]; then
             powershell.exe -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/install.ps1" "$@"
         else
@@ -859,10 +859,16 @@ download_model() {
     echo -e "  ${DIM}${AQUA}      $(msg model_download_hint)${NC}"
     echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
     echo ""
-    # Pull with timeout (30 minutes max — large models take time), retry up to 2 times
+    # Pull with retry (up to 3 attempts). Use timeout if available (not on macOS by default).
     local pull_ok=0
+    local _timeout_cmd=""
+    if command -v timeout &>/dev/null; then
+        _timeout_cmd="timeout 1800"
+    elif command -v gtimeout &>/dev/null; then
+        _timeout_cmd="gtimeout 1800"
+    fi
     for attempt in 1 2 3; do
-        if timeout 1800 ollama pull "$model_name"; then
+        if ${_timeout_cmd} ollama pull "$model_name"; then
             pull_ok=1
             break
         fi
@@ -934,7 +940,7 @@ if ! [ -w "$LIB_DIR" ] || ! [ -w "$BIN_DIR" ]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo "")"
 
 vaporwave_progress "$(msg file_deploy)" 1.5
 

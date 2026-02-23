@@ -177,17 +177,34 @@ if [ -n "$MODEL" ]; then
 fi
 
 # モデルがロード済みか確認 (モデルが指定されている場合のみ)
-# Use Python JSON parsing for exact model matching (grep -qF can match partial names)
+# Two-stage check: Python JSON first, grep -F fallback
 if [ -n "$MODEL" ]; then
-    if ! curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | python3 -c "
+    _model_found=0
+    _api_response="$(curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null)"
+    if [ -n "$_api_response" ]; then
+        # Try Python JSON parsing for exact match
+        if echo "$_api_response" | python3 -c "
 import sys,json
 try:
     d=json.load(sys.stdin)
     names=[m['name'].strip() for m in d.get('models',[])]
     want='$MODEL'.strip()
-    sys.exit(0 if want in names or want+':latest' in names or any(n.startswith(want+':') or n==want for n in names) else 1)
+    # Match exact, with :latest suffix, or prefix match
+    found = want in names or want+':latest' in names
+    found = found or any(n.startswith(want+':') or n.startswith(want+'-') or n==want for n in names)
+    # Also check without tag (e.g. 'qwen3-coder:30b' matches 'qwen3-coder:30b')
+    want_base = want.split(':')[0] if ':' in want else want
+    found = found or any(n.split(':')[0] == want_base for n in names)
+    sys.exit(0 if found else 1)
 except: sys.exit(1)
 " 2>/dev/null; then
+            _model_found=1
+        # Fallback: simple grep (less precise but handles edge cases)
+        elif echo "$_api_response" | grep -qF "$MODEL"; then
+            _model_found=1
+        fi
+    fi
+    if [ "$_model_found" -eq 0 ]; then
         echo "❌ AIモデル $MODEL がまだダウンロードされていません"
         echo ""
         echo "ダウンロードするには、以下のコマンドを貼り付けてEnterを押してください:"
