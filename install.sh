@@ -742,27 +742,10 @@ fi
 if command -v ollama &>/dev/null; then
     vapor_success "Ollama 🦙 $(msg installed) ($(ollama --version 2>/dev/null || echo '?'))"
 else
-    if [ "$IS_MAC" -eq 1 ] && command -v brew &>/dev/null; then
-        if run_with_spinner "Ollama 🦙 $(msg installing)" brew install ollama; then
-            vapor_success "Ollama 🦙 $(msg install_done)"
-        else
-            vapor_error "Ollama 🦙 $(msg install_fail)"
-            vapor_warn "$(msg install_fail_hint): brew install ollama"
-        fi
-    elif [ "$IS_LINUX" -eq 1 ]; then
-        # NOTE: Do NOT use run_with_spinner here — Ollama installer calls
-        # sudo internally and needs interactive TTY for password prompt.
-        vapor_info "Ollama 🦙 $(msg installing)"
-        echo ""
-        if bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
-            vapor_success "Ollama 🦙 $(msg install_done)"
-        else
-            vapor_error "Ollama 🦙 $(msg install_fail)"
-            vapor_warn "$(msg install_fail_hint): curl -fsSL https://ollama.com/install.sh | sh"
-        fi
-    else
-        vapor_error "Ollama 🦙 $(msg install_fail)"
-    fi
+    vapor_warn "Ollama 🦙 not installed — install it after setup:"
+    echo "  macOS:  brew install ollama"
+    echo "  Linux:  curl -fsSL https://ollama.com/install.sh | sh"
+    echo "  Windows: https://ollama.com/download"
 fi
 
 # --- Node.js (optional, for --auto mode Claude Code fallback) ---
@@ -811,117 +794,38 @@ else
 fi
 
 # =============================================
-# Step 4: モデルダウンロード
+# Step 4: 次のステップ / Next steps
 # =============================================
-step_header 4 "$(msg step4)"
+step_header 4 "Next steps"
 
-# Ollama 起動確認 (スピナー付きで待つ)
-if ! curl -s --max-time 2 "http://localhost:11434/api/tags" &>/dev/null; then
-    vapor_info "$(msg ollama_starting)"
-    if [ "$IS_MAC" -eq 1 ]; then
-        open -a Ollama 2>/dev/null || (ollama serve &>/dev/null &)
-    else
-        ollama serve &>/dev/null &
-    fi
-
-    # スピナー付きで起動待ち (最大30秒)
-    local_sparkles=("🦙" "✨" "💫" "🌟")
-    for i in $(seq 1 30); do
-        if curl -s --max-time 1 "http://localhost:11434/api/tags" &>/dev/null; then
-            break
-        fi
-        si=$(( (i - 1) % ${#local_sparkles[@]} ))
-        printf "\r  ${local_sparkles[$si]} ${CYAN}$(msg ollama_wait)${NC} ${DIM}${GRAY}%ds${NC}  " "$i"
-        sleep 1
-    done
-    printf "\r%-60s\r" " "
-
-    if curl -s --max-time 2 "http://localhost:11434/api/tags" &>/dev/null; then
-        vapor_success "Ollama 🦙 $(msg online)"
-    else
-        vapor_error "Ollama failed to start after 30 seconds."
-        echo "  Possible causes:"
-        echo "    - Ollama was not installed correctly"
-        echo "    - Another process is using port 11434"
-        echo "  Try:"
-        echo "    ollama serve    (in a separate terminal)"
-        echo "  Then re-run: bash install.sh"
-        exit 1
-    fi
-fi
-
-# Check disk space (warn if < 20GB free)
-if command -v df &>/dev/null; then
-    AVAIL_KB=$(df -k "$HOME" | awk 'NR==2{print $4}')
-    AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
-    if [ "$AVAIL_GB" -lt 20 ]; then
-        vapor_warn "Low disk space: ${AVAIL_GB}GB available (20GB+ recommended for model download)"
-        echo "  Free up disk space if the download fails."
-    fi
-fi
-
-# Helper: download a model if not already present
-download_model() {
-    local model_name="$1"
-    local label="${2:-}"
-    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$model_name"; then
-        vapor_success "$model_name $(msg model_downloaded) 🧠✨ ${label}"
-        return 0
+echo ""
+echo -e "  ${BOLD}${WHITE}Run the following commands to finish setup:${NC}"
+echo ""
+if ! command -v ollama &>/dev/null; then
+    echo -e "  ${CYAN}1.${NC} Install Ollama:"
+    echo "       macOS:  brew install ollama"
+    echo "       Linux:  curl -fsSL https://ollama.com/install.sh | sh"
+    echo "       Windows: https://ollama.com/download"
+    echo ""
+    echo -e "  ${CYAN}2.${NC} Pull a model ${DIM}(recommended for your ${RAM_GB}GB RAM)${NC}:"
+    echo "       ollama pull $MODEL"
+    if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
+        echo "       ollama pull $SIDECAR_MODEL"
     fi
     echo ""
-    echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-    echo -e "  ${BOLD}${MAGENTA}  🔽  ${WHITE}$model_name ${CYAN}$(msg model_downloading) ${label}${NC}"
-    echo -e "  ${DIM}${AQUA}      $(msg model_download_hint)${NC}"
-    echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-    echo ""
-    # Pull with retry (up to 3 attempts). Use timeout if available (not on macOS by default).
-    local pull_ok=0
-    local _timeout_cmd=""
-    if command -v timeout &>/dev/null; then
-        _timeout_cmd="timeout 1800"
-    elif command -v gtimeout &>/dev/null; then
-        _timeout_cmd="gtimeout 1800"
-    fi
-    for attempt in 1 2 3; do
-        if ${_timeout_cmd} ollama pull "$model_name"; then
-            pull_ok=1
-            break
-        fi
-        if [ "$attempt" -lt 3 ]; then
-            echo -e "  ${YELLOW}⚠️  Download interrupted (attempt $attempt/3), retrying in 5s...${NC}"
-            sleep 5
-        fi
-    done
-    if [ "$pull_ok" -eq 0 ]; then
-        echo -e "  ${RED}⚠️  ダウンロード失敗 (3回試行) / Download failed after 3 attempts${NC}"
-        echo -e "  ${DIM}手動で再試行: ollama pull $model_name${NC}"
-        return 1
+    echo -e "  ${CYAN}3.${NC} Start vibe-local:"
+    echo "       vibe-local"
+else
+    echo -e "  ${CYAN}1.${NC} Pull a model ${DIM}(recommended for your ${RAM_GB}GB RAM)${NC}:"
+    echo "       ollama pull $MODEL"
+    if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
+        echo "       ollama pull $SIDECAR_MODEL"
     fi
     echo ""
-    if curl -s "http://localhost:11434/api/tags" 2>/dev/null | grep -qF "$model_name"; then
-        echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-        vapor_success "$model_name $(msg model_dl_done) 🧠🎉 ${label}"
-        echo -e "  ${PINK}💜${MAGENTA}💜${PURPLE}💜${CYAN}💜${AQUA}💜${MINT}💜${NEON_GREEN}💜${YELLOW}💜${ORANGE}💜${CORAL}💜${HOT_PINK}💜${NC}"
-    else
-        vapor_warn "$model_name $(msg install_fail) - ollama pull $model_name"
-        return 1
-    fi
-    echo ""
-    return 0
-}
-
-# Download main model
-if ! download_model "$MODEL" "(main)"; then
-    vapor_error "Failed to download main model: $MODEL"
-    vapor_warn "Try manually: ollama pull $MODEL"
+    echo -e "  ${CYAN}2.${NC} Start vibe-local:"
+    echo "       vibe-local"
 fi
-
-# Download sidecar model if different from main
-if [ -n "$SIDECAR_MODEL" ] && [ "$SIDECAR_MODEL" != "$MODEL" ]; then
-    if ! download_model "$SIDECAR_MODEL" "(sidecar)"; then
-        vapor_warn "Sidecar model download failed (non-critical): $SIDECAR_MODEL"
-    fi
-fi
+echo ""
 
 # =============================================
 # Step 5: ファイル配置

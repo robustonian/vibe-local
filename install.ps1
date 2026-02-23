@@ -535,69 +535,8 @@ if ($ollamaFound) {
     $ollamaVer = ollama --version 2>&1
     Vapor-Success "Ollama $(msg 'installed') ($ollamaVer)"
 } else {
-    Vapor-Info "Ollama $(msg 'installing')"
-    $ollamaInstalled = $false
-
-    # Method 1: Try winget
-    if (-not $ollamaInstalled -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Vapor-Info "Trying winget..."
-        try {
-            $wingetOut = winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements 2>&1
-            # Refresh PATH after winget install
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-            if (Get-Command ollama -ErrorAction SilentlyContinue) {
-                $ollamaInstalled = $true
-                Vapor-Success "Ollama $(msg 'install_done') (winget)"
-            }
-        } catch {}
-    }
-
-    # Method 2: Direct download from ollama.com
-    if (-not $ollamaInstalled) {
-        Vapor-Info "Downloading Ollama installer directly..."
-        $ollamaSetup = Join-Path $env:TEMP "OllamaSetup.exe"
-        try {
-            Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaSetup -ErrorAction Stop
-            Vapor-Info "Running OllamaSetup.exe..."
-            Write-Host ""
-            Write-Host "  ${YELLOW}${BOLD}>>> Ollama installer will open. Please follow the installation wizard. <<<${NC}"
-            Write-Host "  ${DIM}${AQUA}    (If a UAC prompt appears, click 'Yes' to allow installation)${NC}"
-            Write-Host ""
-            $proc = Start-Process -FilePath $ollamaSetup -PassThru -Wait
-            # Refresh PATH after installer
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-            # Also check common Ollama install paths
-            $ollamaPaths = @(
-                "$env:LOCALAPPDATA\Programs\Ollama",
-                "$env:ProgramFiles\Ollama",
-                "${env:ProgramFiles(x86)}\Ollama"
-            )
-            foreach ($op in $ollamaPaths) {
-                if ((Test-Path (Join-Path $op "ollama.exe")) -and ($env:Path -notlike "*$op*")) {
-                    $env:Path = "$op;$env:Path"
-                }
-            }
-            if (Get-Command ollama -ErrorAction SilentlyContinue) {
-                $ollamaInstalled = $true
-                Vapor-Success "Ollama $(msg 'install_done') (direct download)"
-            }
-            # Clean up installer
-            Remove-Item $ollamaSetup -Force -ErrorAction SilentlyContinue
-        } catch {
-            Vapor-Warn "Direct download failed: $($_.Exception.Message)"
-        }
-    }
-
-    if (-not $ollamaInstalled) {
-        Vapor-Error "Ollama $(msg 'install_fail')"
-        Write-Host ""
-        Write-Host "  ${BOLD}${WHITE}Please install Ollama manually:${NC}"
-        Write-Host "  ${CYAN}1.${NC} Open: ${BOLD}https://ollama.com/download${NC}"
-        Write-Host "  ${CYAN}2.${NC} Click 'Download for Windows'"
-        Write-Host "  ${CYAN}3.${NC} Run the downloaded OllamaSetup.exe"
-        Write-Host "  ${CYAN}4.${NC} After installation, re-run this installer"
-        Write-Host ""
-    }
+    Vapor-Warn "Ollama not installed — install it after setup:"
+    Write-Host "  https://ollama.com/download"
 }
 
 # --- Claude Code CLI (optional, for --auto mode fallback) ---
@@ -608,133 +547,28 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
 }
 
 # =============================================
-# Step 4: Model download
+# Step 4: Next steps
 # =============================================
-Step-Header 4 (msg 'step4')
+Step-Header 4 "Next steps"
 
-# --- Disk space warning ---
-try {
-    $drive = (Resolve-Path $env:USERPROFILE).Drive
-    $freeGB = [math]::Round($drive.Free / 1GB)
-    if ($freeGB -lt 20) {
-        Vapor-Warn "Low disk space: ${freeGB}GB available (20GB+ recommended)"
+Write-Host ""
+Write-Host "  Run the following to finish setup:"
+Write-Host ""
+if (-not $ollamaFound) {
+    Write-Host "  1. Install Ollama:  https://ollama.com/download"
+    Write-Host "  2. Pull a model:    ollama pull $SelectedModel"
+    if ($SidecarModel -and $SidecarModel -ne $SelectedModel) {
+        Write-Host "                      ollama pull $SidecarModel"
     }
-} catch { }
-
-# Ensure Ollama is running
-$ollamaRunning = $false
-try {
-    # PS 5.1 needs ~2s for first .NET HTTP call; use 5s timeout to avoid false negatives
-    $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    $ollamaRunning = ($resp.StatusCode -eq 200)
-} catch {}
-
-if (-not $ollamaRunning) {
-    # Refresh PATH in case Ollama was just installed in Step 3
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-    # Also check common Ollama install paths
-    foreach ($op in @("$env:LOCALAPPDATA\Programs\Ollama", "$env:ProgramFiles\Ollama")) {
-        if ((Test-Path (Join-Path $op "ollama.exe")) -and ($env:Path -notlike "*$op*")) {
-            $env:Path = "$op;$env:Path"
-        }
+    Write-Host "  3. Start:           vibe-local"
+} else {
+    Write-Host "  1. Pull a model:    ollama pull $SelectedModel"
+    if ($SidecarModel -and $SidecarModel -ne $SelectedModel) {
+        Write-Host "                      ollama pull $SidecarModel"
     }
-
-    Vapor-Info (msg 'ollama_starting')
-    # Try to start Ollama: first as a process, then restart the Windows service
-    $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
-    if ($ollamaCmd) {
-        try {
-            Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
-        } catch {
-            Vapor-Warn "Could not start Ollama process"
-        }
-    } else {
-        # Ollama might be installed as a Windows service
-        try {
-            Restart-Service "Ollama" -ErrorAction Stop
-        } catch {
-            Vapor-Warn "Could not start Ollama automatically"
-        }
-    }
-
-    for ($i = 1; $i -le 30; $i++) {
-        Write-Host "`r  $(msg 'ollama_wait')... ${i}s " -NoNewline
-        Start-Sleep -Seconds 1
-        try {
-            $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-            $ollamaRunning = ($resp.StatusCode -eq 200)
-            break
-        } catch {}
-    }
-    Write-Host "`r$(' ' * 50)"
-
-    if ($ollamaRunning) {
-        Vapor-Success "Ollama $(msg 'online')"
-    } else {
-        Vapor-Error "Ollama failed to start after 30 seconds."
-        Write-Host ""
-        Write-Host "  ${BOLD}${WHITE}Possible causes:${NC}"
-        Write-Host "  ${CYAN}1.${NC} Ollama was not installed correctly"
-        Write-Host "     -> Reinstall from: ${BOLD}https://ollama.com/download${NC}"
-        Write-Host "  ${CYAN}2.${NC} Another process is using port 11434"
-        Write-Host "     -> Close other Ollama instances"
-        Write-Host "  ${CYAN}3.${NC} Ollama is not in PATH"
-        Write-Host "     -> Restart your terminal after Ollama installation"
-        Write-Host ""
-        Write-Host "  ${YELLOW}Try:${NC} Open a ${BOLD}new${NC} PowerShell window and run: ${BOLD}ollama serve${NC}"
-        Write-Host "  Then re-run this installer."
-        Write-Host ""
-        exit 1
-    }
+    Write-Host "  2. Start:           vibe-local"
 }
-
-# Download model
-function Download-Model {
-    param([string]$modelName, [string]$label = "")
-    try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-        $tags = $resp.Content | ConvertFrom-Json
-        $found = $tags.models | Where-Object { $_.name -eq $modelName }
-        if ($found) {
-            Vapor-Success "$modelName $(msg 'model_downloaded') $label"
-            return $true
-        }
-    } catch {}
-
-    Write-Host ""
-    Write-Host "  ${PINK}##${MAGENTA}##${PURPLE}##${CYAN}##${AQUA}##${MINT}##${NEON_GREEN}##${YELLOW}##${ORANGE}##${CORAL}##${HOT_PINK}##${NC}"
-    Write-Host "  ${BOLD}${MAGENTA}  >>  ${WHITE}${modelName} ${CYAN}$(msg 'model_downloading') ${label}${NC}"
-    Write-Host "  ${DIM}${AQUA}      $(msg 'model_download_hint')${NC}"
-    Write-Host "  ${PINK}##${MAGENTA}##${PURPLE}##${CYAN}##${AQUA}##${MINT}##${NEON_GREEN}##${YELLOW}##${ORANGE}##${CORAL}##${HOT_PINK}##${NC}"
-    Write-Host ""
-
-    & ollama pull $modelName
-    Write-Host ""
-
-    try {
-        $resp2 = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-        $tags2 = $resp2.Content | ConvertFrom-Json
-        $found2 = $tags2.models | Where-Object { $_.name -eq $modelName }
-        if ($found2) {
-            Vapor-Success "$modelName $(msg 'model_dl_done') $label"
-            return $true
-        }
-    } catch {}
-
-    Vapor-Warn "$modelName $(msg 'install_fail') - ollama pull $modelName"
-    return $false
-}
-
-if (-not (Download-Model $SelectedModel "(main)")) {
-    Vapor-Error "Failed to download main model: $SelectedModel"
-    Vapor-Warn "Try manually: ollama pull $SelectedModel"
-}
-
-if ($SidecarModel -and $SidecarModel -ne $SelectedModel) {
-    if (-not (Download-Model $SidecarModel "(sidecar)")) {
-        Vapor-Warn "Sidecar model download failed (non-critical): $SidecarModel"
-    }
-}
+Write-Host ""
 
 # =============================================
 # Step 5: File deployment
