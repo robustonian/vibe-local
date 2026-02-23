@@ -19,6 +19,7 @@ node_modules/
 # Secrets - NEVER commit these
 .env
 .env.*
+!.env.example
 *credentials*
 *secret*
 *api_key*

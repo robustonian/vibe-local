@@ -561,7 +561,8 @@ Format: `KEY="value"`. Lines starting with `#` are comments.
 |-----|---------|-------------|
 | `MODEL` | auto (by RAM) | Main model name |
 | `SIDECAR_MODEL` | auto (by RAM) | Sidecar model (lighter, for compaction etc.) |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_HOST` | `http://localhost:11434` | API endpoint (Ollama or any OpenAI-compatible) |
+| `API_KEY` | `` | API key for non-Ollama backends |
 | `MAX_TOKENS` | `8192` | Max output tokens per response |
 | `TEMPERATURE` | `0.7` | Sampling temperature |
 | `CONTEXT_WINDOW` | `32768` | Context window size in tokens |
@@ -572,7 +573,39 @@ Example:
 MODEL="qwen3:8b"
 SIDECAR_MODEL="qwen3:1.7b"
 OLLAMA_HOST="http://localhost:11434"
+# API_KEY=""      # API key for non-Ollama backends (OpenAI, Groq, etc.)
 ```
+
+### .env File (Project-level Config)
+
+Place a `.env` file in your working directory to set per-project configuration.
+It overrides the global config file but is overridden by shell environment variables.
+
+```bash
+# .env  (copy from .env.example)
+OLLAMA_HOST=http://localhost:8080
+MODEL=llama3.1:8b
+API_KEY=sk-your-key-here
+```
+
+**Priority (last wins):** `~/.config/vibe-local/config` < `.env` < environment variables < CLI flags
+
+### Supported Backends
+
+vibe-local works with any OpenAI-compatible API endpoint:
+
+| Backend | `OLLAMA_HOST` | `API_KEY` |
+|---------|--------------|-----------|
+| Ollama (default) | `http://localhost:11434` | not required |
+| llama.cpp server | `http://localhost:8080` | not required |
+| LM Studio | `http://localhost:1234` | not required |
+| vLLM | `http://localhost:8000` | not required |
+| OpenAI | `https://api.openai.com/v1` | required |
+| Groq | `https://api.groq.com/openai/v1` | required |
+| Together AI | `https://api.together.xyz/v1` | required |
+
+> When using non-Ollama backends, set `MODEL` explicitly (auto-detection requires Ollama).
+> Ollama-specific features (`ollama pull`, model auto-detect) are skipped automatically.
 
 ### Model Tiers
 
@@ -591,14 +624,16 @@ vibe-local auto-detects installed Ollama models and picks the best one for your 
 
 ### Environment Variables
 
-Priority: CLI flags > Environment variables > Config file > Defaults
+Priority: CLI flags > Environment variables > `.env` > Config file > Defaults
 
 | Variable | Description |
 |----------|-------------|
-| `OLLAMA_HOST` | Ollama API endpoint |
-| `VIBE_CODER_MODEL` | Override main model (highest priority) |
+| `OLLAMA_HOST` | API endpoint (Ollama or OpenAI-compatible) |
+| `API_KEY` | API key for non-Ollama backends |
+| `VIBE_LOCAL_API_KEY` | Same as `API_KEY` (set by launcher) |
+| `VIBE_CODER_MODEL` | Override main model (legacy) |
 | `VIBE_LOCAL_MODEL` | Main model (set by launcher) |
-| `VIBE_CODER_SIDECAR` | Override sidecar model |
+| `VIBE_CODER_SIDECAR` | Override sidecar model (legacy) |
 | `VIBE_LOCAL_SIDECAR_MODEL` | Sidecar model (set by launcher) |
 | `VIBE_CODER_DEBUG` / `VIBE_LOCAL_DEBUG` | Set to `1` for debug logging |
 

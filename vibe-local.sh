@@ -31,6 +31,7 @@ MODEL=""
 SIDECAR_MODEL=""
 OLLAMA_HOST="http://localhost:11434"
 VIBE_LOCAL_DEBUG=0
+VIBE_LOCAL_API_KEY=""
 
 # [C1 fix] source ではなく grep + cut で既知キーのみ安全に読む
 # cut is safer than sed for values containing special characters
@@ -40,22 +41,38 @@ if [ -f "$CONFIG_FILE" ]; then
     _s="$(_val SIDECAR_MODEL)"
     _h="$(_val OLLAMA_HOST)"
     _d="$(_val VIBE_LOCAL_DEBUG)"
+    _k="$(_val API_KEY)"
     [ -n "$_m" ] && MODEL="$_m"
     [ -n "$_s" ] && SIDECAR_MODEL="$_s"
     [ -n "$_h" ] && OLLAMA_HOST="$_h"
     [ -n "$_d" ] && VIBE_LOCAL_DEBUG="$_d"
+    [ -n "$_k" ] && VIBE_LOCAL_API_KEY="$_k"
     unset -f _val
-    unset _m _s _h _d
+    unset _m _s _h _d _k
 fi
 
-# [SEC] Validate OLLAMA_HOST - only allow localhost (SSRF prevention)
-# Strict regex: reject @-credential injection (e.g. http://localhost:11434@attacker.com)
+# .env from CWD (project-level config — higher priority than global config)
+_DOTENV_FILE="$(pwd)/.env"
+if [ -f "$_DOTENV_FILE" ] && [ ! -L "$_DOTENV_FILE" ]; then
+    _dval() { grep -E "^${1}=" "$_DOTENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' | sed "s/^[\"']//;s/[\"'[:space:]]*$//;s/[[:space:]]*#.*//" || true; }
+    _dh="$(_dval OLLAMA_HOST)"; [ -n "$_dh" ] && OLLAMA_HOST="$_dh"
+    _dm="$(_dval MODEL)"; [ -n "$_dm" ] && MODEL="$_dm"
+    _ds="$(_dval SIDECAR_MODEL)"; [ -n "$_ds" ] && SIDECAR_MODEL="$_ds"
+    _dk="$(_dval API_KEY)"; [ -n "$_dk" ] && VIBE_LOCAL_API_KEY="$_dk"
+    _dd="$(_dval VIBE_LOCAL_DEBUG)"; [ -n "$_dd" ] && VIBE_LOCAL_DEBUG="$_dd"
+    unset -f _dval
+    unset _dh _dm _ds _dk _dd
+fi
+unset _DOTENV_FILE
+
+# [SEC] Validate OLLAMA_HOST - require http/https scheme, reject credential injection
+# Allows any host (localhost or remote), rejects user:pass@ injection
 _host_valid=0
-if [[ "$OLLAMA_HOST" =~ ^http://(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}(/.*)?$ ]]; then
-    [[ "$OLLAMA_HOST" != *@* ]] && _host_valid=1
+if [[ "$OLLAMA_HOST" =~ ^https?://[^@[:space:]]+$ ]]; then
+    _host_valid=1
 fi
 if [ "$_host_valid" -eq 0 ]; then
-    echo "⚠️  OLLAMA_HOST='$OLLAMA_HOST' はlocalhostではありません。セキュリティのためlocalhostにリセットします。"
+    echo "⚠️  OLLAMA_HOST='$OLLAMA_HOST' は無効なURLです。デフォルトにリセットします。"
     OLLAMA_HOST="http://localhost:11434"
 fi
 unset _host_valid
@@ -85,8 +102,20 @@ fi
 
 # --- ollama が起動しているか確認・起動 ---
 ensure_ollama() {
+    # Check if backend is already reachable (Ollama /api/tags or OpenAI /v1/models)
     if curl -s --max-time 2 "$OLLAMA_HOST/api/tags" &>/dev/null; then
         return 0
+    fi
+    if curl -s --max-time 2 "$OLLAMA_HOST/v1/models" &>/dev/null; then
+        return 0
+    fi
+
+    # For remote (non-localhost) endpoints, we cannot auto-start the server
+    if [[ ! "$OLLAMA_HOST" =~ ^http://(localhost|127\.0\.0\.1|\[::1\]) ]]; then
+        echo "❌ リモートエンドポイント '$OLLAMA_HOST' に接続できません。"
+        echo ""
+        echo "エンドポイントが起動していることを確認してください。"
+        return 1
     fi
 
     if ! command -v ollama &>/dev/null; then
@@ -192,9 +221,9 @@ if [ -n "$MODEL" ]; then
     MODEL_ARGS+=(--model "$MODEL")
 fi
 
-# モデルがロード済みか確認 (モデルが指定されている場合のみ)
+# モデルがロード済みか確認 (Ollama localhost の場合のみ)
 # Two-stage check: Python JSON first, grep -F fallback
-if [ -n "$MODEL" ]; then
+if [ -n "$MODEL" ] && [[ "$OLLAMA_HOST" =~ ^http://(localhost|127\.0\.0\.1|\[::1\]) ]]; then
     _model_found=0
     _api_response="$(curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null)"
     if [ -n "$_api_response" ]; then
@@ -299,6 +328,7 @@ echo "============================================"
 echo ""
 
 OLLAMA_HOST="$OLLAMA_HOST" \
+VIBE_LOCAL_API_KEY="${VIBE_LOCAL_API_KEY:-}" \
 VIBE_LOCAL_MODEL="${MODEL:-}" \
 VIBE_LOCAL_SIDECAR_MODEL="${SIDECAR_MODEL:-}" \
 VIBE_LOCAL_DEBUG="${VIBE_LOCAL_DEBUG:-0}" \

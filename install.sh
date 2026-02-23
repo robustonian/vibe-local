@@ -1006,6 +1006,7 @@ else
 MODEL="$MODEL"
 SIDECAR_MODEL="${SIDECAR_MODEL}"
 OLLAMA_HOST="http://localhost:11434"
+# API_KEY=""      # API key for non-Ollama backends (OpenAI, Groq, LM Studio, etc.)
 EOF
     vapor_success "$(msg config_file): $CONFIG_FILE"
 fi

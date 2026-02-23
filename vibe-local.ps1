@@ -46,6 +46,7 @@ $CfgModel = ""
 $SidecarModel = ""
 $OllamaHost = "http://localhost:11434"
 $VibeLocalDebug = 0
+$ApiKey = ""
 
 # Parse config file (safe grep-style, no dot-sourcing)
 if (Test-Path $ConfigFile) {
@@ -56,6 +57,21 @@ if (Test-Path $ConfigFile) {
         if ($line -match '^\s*SIDECAR_MODEL\s*=\s*"?([^"]*)"?\s*$') { $SidecarModel = $Matches[1].Trim() }
         if ($line -match '^\s*OLLAMA_HOST\s*=\s*"?([^"]*)"?\s*$') { $OllamaHost = $Matches[1].Trim() }
         if ($line -match '^\s*VIBE_LOCAL_DEBUG\s*=\s*"?([01])"?\s*$') { $VibeLocalDebug = [int]$Matches[1] }
+        if ($line -match '^\s*API_KEY\s*=\s*"?([^"]*)"?\s*$') { $ApiKey = $Matches[1].Trim() }
+    }
+}
+
+# .env from CWD (project-level config — higher priority than global config)
+$DotEnvFile = Join-Path (Get-Location) ".env"
+if ((Test-Path $DotEnvFile) -and (-not (Get-Item $DotEnvFile).LinkType)) {
+    $dotEnvLines = Get-Content $DotEnvFile -ErrorAction SilentlyContinue
+    foreach ($line in $dotEnvLines) {
+        if ($line -match '^\s*#') { continue }
+        if ($line -match '^\s*OLLAMA_HOST\s*=\s*"?([^"]*)"?\s*$') { $OllamaHost = $Matches[1].Trim() }
+        if ($line -match '^\s*MODEL\s*=\s*"?([^"]*)"?\s*$') { $CfgModel = $Matches[1].Trim() }
+        if ($line -match '^\s*SIDECAR_MODEL\s*=\s*"?([^"]*)"?\s*$') { $SidecarModel = $Matches[1].Trim() }
+        if ($line -match '^\s*API_KEY\s*=\s*"?([^"]*)"?\s*$') { $ApiKey = $Matches[1].Trim() }
+        if ($line -match '^\s*VIBE_LOCAL_DEBUG\s*=\s*"?([01])"?\s*$') { $VibeLocalDebug = [int]$Matches[1] }
     }
 }
 
@@ -63,10 +79,14 @@ if (Test-Path $ConfigFile) {
 if ($Model) { $CfgModel = $Model }
 if ($DebugMode) { $VibeLocalDebug = 1 }
 
-# [SEC] Validate OLLAMA_HOST - only allow localhost (SSRF prevention)
-$ollamaUri = [System.Uri]::new($OllamaHost)
-if ($ollamaUri.Host -notin @("localhost", "127.0.0.1", "::1", "[::1]")) {
-    Write-Host "Warning: OLLAMA_HOST '$($ollamaUri.Host)' is not localhost. Resetting to localhost for security." -ForegroundColor Yellow
+# [SEC] Validate OLLAMA_HOST - require http/https scheme, reject credential injection
+try {
+    $ollamaUri = [System.Uri]::new($OllamaHost)
+    if ($ollamaUri.Scheme -notin @("http", "https") -or $OllamaHost -match "@") {
+        throw "invalid scheme or credential injection"
+    }
+} catch {
+    Write-Host "Warning: OLLAMA_HOST '$OllamaHost' is not a valid URL. Resetting to default." -ForegroundColor Yellow
     $OllamaHost = "http://localhost:11434"
 }
 
@@ -278,6 +298,7 @@ try {
     Write-Host ""
 
     $env:OLLAMA_HOST = $OllamaHost
+    $env:VIBE_LOCAL_API_KEY = $ApiKey
     $env:VIBE_LOCAL_MODEL = $CfgModel
     $env:VIBE_LOCAL_SIDECAR_MODEL = if ($SidecarModel) { $SidecarModel } else { "" }
     $env:VIBE_LOCAL_DEBUG = "$VibeLocalDebug"
@@ -296,6 +317,7 @@ try {
 finally {
     # [SEC] Clean up environment variables set during this session
     Remove-Item Env:OLLAMA_HOST -ErrorAction SilentlyContinue
+    Remove-Item Env:VIBE_LOCAL_API_KEY -ErrorAction SilentlyContinue
     Remove-Item Env:VIBE_LOCAL_MODEL -ErrorAction SilentlyContinue
     Remove-Item Env:VIBE_LOCAL_SIDECAR_MODEL -ErrorAction SilentlyContinue
     Remove-Item Env:VIBE_LOCAL_DEBUG -ErrorAction SilentlyContinue

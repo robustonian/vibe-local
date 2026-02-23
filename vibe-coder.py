@@ -180,6 +180,7 @@ class Config:
         self.resume = False
         self.session_id = None
         self.list_sessions = False
+        self.api_key = ""           # API key for non-Ollama backends
         self.cwd = os.getcwd()
 
         # Paths (primary: vibe-local, with backward compat for old vibe-coder dirs)
@@ -204,6 +205,7 @@ class Config:
     def load(self, argv=None):
         """Load config from file, then env, then CLI args (later overrides earlier)."""
         self._load_config_file()
+        self._load_dotenv()
         self._load_env()
         self._load_cli_args(argv)
         self._auto_detect_model()
@@ -227,6 +229,18 @@ class Config:
             except OSError:
                 continue
             self._parse_config_file(cfg_path)
+
+    def _load_dotenv(self):
+        """Load .env from CWD (project-level config, higher priority than global config)."""
+        env_path = os.path.join(self.cwd, ".env")
+        if not os.path.isfile(env_path) or os.path.islink(env_path):
+            return
+        try:
+            if os.path.getsize(env_path) > 65536:
+                return
+        except OSError:
+            return
+        self._parse_config_file(env_path)
 
     def _parse_config_file(self, cfg_path):
         try:
@@ -261,6 +275,8 @@ class Config:
                             self.context_window = int(val)
                         except ValueError:
                             pass
+                    elif key == "API_KEY" and val:
+                        self.api_key = val
         except (OSError, IOError):
             pass  # Config file unreadable — skip silently
 
@@ -278,6 +294,10 @@ class Config:
             self.sidecar_model = os.environ["VIBE_LOCAL_SIDECAR_MODEL"]
         if os.environ.get("VIBE_CODER_DEBUG") == "1" or os.environ.get("VIBE_LOCAL_DEBUG") == "1":
             self.debug = True
+        if os.environ.get("API_KEY"):
+            self.api_key = os.environ["API_KEY"]
+        if os.environ.get("VIBE_LOCAL_API_KEY"):
+            self.api_key = os.environ["VIBE_LOCAL_API_KEY"]
 
     def _load_cli_args(self, argv=None):
         # Strip full-width spaces from args (common with Japanese IME input)
@@ -445,15 +465,35 @@ class Config:
                 self.sidecar_model = "qwen3:1.7b"
 
     def _query_installed_models(self):
-        """Query Ollama API for installed model names. Returns list or empty."""
-        url = f"{self.ollama_host}/api/tags"
+        """Query API for installed model names. Returns list or empty.
+        Tries Ollama /api/tags first, falls back to OpenAI-compatible /v1/models."""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        # Try Ollama /api/tags first
         try:
-            resp = urllib.request.urlopen(url, timeout=3)
+            req = urllib.request.Request(
+                f"{self.ollama_host}/api/tags", headers=headers
+            )
+            resp = urllib.request.urlopen(req, timeout=3)
             try:
                 data = json.loads(resp.read(10 * 1024 * 1024))
             finally:
                 resp.close()
             return [m["name"].strip() for m in data.get("models", [])]
+        except Exception:
+            pass
+        # Fallback: OpenAI-compatible /v1/models
+        try:
+            req = urllib.request.Request(
+                f"{self.ollama_host}/v1/models", headers=headers
+            )
+            resp = urllib.request.urlopen(req, timeout=3)
+            try:
+                data = json.loads(resp.read(10 * 1024 * 1024))
+            finally:
+                resp.close()
+            return [m.get("id", "").strip() for m in data.get("data", []) if m.get("id")]
         except Exception:
             return []
 
@@ -512,12 +552,11 @@ class Config:
 
     def _validate_ollama_host(self):
         parsed = urllib.parse.urlparse(self.ollama_host)
-        hostname = parsed.hostname or ""
-        allowed = {"localhost", "127.0.0.1", "::1", "[::1]"}
-        if hostname not in allowed:
-            print(f"{C.YELLOW}Warning: OLLAMA_HOST '{hostname}' is not localhost. "
-                  f"Resetting to localhost for security.{C.RESET}", file=sys.stderr)
+        if parsed.scheme not in ("http", "https"):
+            print(f"{C.YELLOW}Warning: OLLAMA_HOST must use http:// or https://. "
+                  f"Resetting to default.{C.RESET}", file=sys.stderr)
             self.ollama_host = self.DEFAULT_OLLAMA_HOST
+            parsed = urllib.parse.urlparse(self.ollama_host)
         # Strip credentials from URL to prevent leaking in banner/errors
         if parsed.username or parsed.password:
             clean = f"{parsed.scheme}://{parsed.hostname}"
@@ -794,25 +833,72 @@ class OllamaClient:
 
     def __init__(self, config):
         self.base_url = config.ollama_host
+        self.api_key = config.api_key
         self.max_tokens = config.max_tokens
         self.temperature = config.temperature
         self.context_window = config.context_window
         self.debug = config.debug
         self.timeout = 300
+        self._ollama_detected = None  # None=unchecked, True/False=cached
+
+    def _make_headers(self):
+        """Build HTTP headers, including Authorization if api_key is set."""
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def _is_ollama(self):
+        """Return True if the backend responds to /api/tags (i.e. is Ollama). Cached."""
+        if self._ollama_detected is not None:
+            return self._ollama_detected
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/tags",
+                headers=self._make_headers(),
+            )
+            resp = urllib.request.urlopen(req, timeout=3)
+            resp.close()
+            self._ollama_detected = True
+        except Exception:
+            self._ollama_detected = False
+        return self._ollama_detected
 
     def check_connection(self, retries=3):
-        """Check if Ollama is reachable. Returns (ok, model_list)."""
-        url = f"{self.base_url}/api/tags"
+        """Check if backend is reachable. Returns (ok, model_list).
+        Tries Ollama /api/tags first, falls back to OpenAI-compatible /v1/models."""
+        if self._is_ollama():
+            url = f"{self.base_url}/api/tags"
+            for attempt in range(retries):
+                try:
+                    req = urllib.request.Request(url, headers=self._make_headers())
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    try:
+                        data = json.loads(resp.read(10 * 1024 * 1024))  # 10MB cap
+                    finally:
+                        resp.close()
+                    models = [m["name"] for m in data.get("models", [])]
+                    return True, models
+                except Exception:
+                    if attempt < retries - 1:
+                        time.sleep(1)
+                        continue
+                    return False, []
+        # Fallback: OpenAI-compatible /v1/models
         for attempt in range(retries):
             try:
-                resp = urllib.request.urlopen(url, timeout=5)
+                req = urllib.request.Request(
+                    f"{self.base_url}/v1/models",
+                    headers=self._make_headers(),
+                )
+                resp = urllib.request.urlopen(req, timeout=5)
                 try:
-                    data = json.loads(resp.read(10 * 1024 * 1024))  # 10MB cap
+                    data = json.loads(resp.read(10 * 1024 * 1024))
                 finally:
                     resp.close()
-                models = [m["name"] for m in data.get("models", [])]
+                models = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
                 return True, models
-            except Exception as e:
+            except Exception:
                 if attempt < retries - 1:
                     time.sleep(1)
                     continue
@@ -843,11 +929,14 @@ class OllamaClient:
 
         Returns True on success, False on failure.
         """
+        if not self._is_ollama():
+            print(f"{C.YELLOW}[info] Non-Ollama backend — skipping pull for '{model_name}'.{C.RESET}")
+            return False
         url = f"{self.base_url}/api/pull"
         body = json.dumps({"name": model_name}).encode("utf-8")
         req = urllib.request.Request(
             url, data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._make_headers(),
             method="POST",
         )
         try:
@@ -896,9 +985,10 @@ class OllamaClient:
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "stream": stream,
-            "keep_alive": -1,  # Keep model loaded in VRAM for the session
-            "options": {"num_ctx": self.context_window},  # Tell Ollama our context budget
         }
+        if self._is_ollama():
+            payload["keep_alive"] = -1  # Keep model loaded in VRAM for the session
+            payload["options"] = {"num_ctx": self.context_window}  # Tell Ollama our context budget
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -913,7 +1003,7 @@ class OllamaClient:
         req = urllib.request.Request(
             f"{self.base_url}/v1/chat/completions",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._make_headers(),
             method="POST",
         )
 
@@ -1022,7 +1112,7 @@ class OllamaClient:
             req = urllib.request.Request(
                 f"{self.base_url}/api/tokenize",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers=self._make_headers(),
                 method="POST",
             )
             resp = urllib.request.urlopen(req, timeout=5)
