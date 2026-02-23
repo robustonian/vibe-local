@@ -1,4 +1,4 @@
-# vibe-local.ps1
+﻿# vibe-local.ps1
 # Windows launcher for vibe-local
 # Uses vibe-coder.py directly — no proxy, no Node.js, no Claude Code needed
 #
