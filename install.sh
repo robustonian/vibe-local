@@ -4,7 +4,7 @@
 # Trilingual: 日本語 / English / 中文
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 #   bash install.sh
 #   bash install.sh --model qwen3:8b
 #   bash install.sh --lang en
@@ -22,7 +22,7 @@ case "$(uname -s 2>/dev/null)" in
             powershell.exe -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/install.ps1" "$@"
         else
             echo "Error: install.ps1 not found. Download from:"
-            echo "  https://github.com/ochyai/vibe-local"
+            echo "  https://github.com/robustonian/vibe-local"
         fi
         exit $?
         ;;
@@ -964,7 +964,7 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/vibe-coder.py" ]; then
     cp "${SCRIPT_DIR}/vibe-coder.py" "$LIB_DIR/"
     cp "${SCRIPT_DIR}/vibe-local.sh" "$BIN_DIR/vibe-local"
 else
-    REPO_RAW="https://raw.githubusercontent.com/ochyai/vibe-local/main"
+    REPO_RAW="https://raw.githubusercontent.com/robustonian/vibe-local/main"
     vapor_info "$(msg source_github)"
     if ! curl -fsSL "${REPO_RAW}/vibe-coder.py" -o "$LIB_DIR/vibe-coder.py"; then
         vapor_error "Failed to download vibe-coder.py from GitHub"

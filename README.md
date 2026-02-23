@@ -50,12 +50,12 @@ vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200行) → Ollama (直
 
 *Mac / Linux / Windows(WSL) の場合:*
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 *Windows (PowerShell) の場合:*
 ```powershell
-Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/ochyai/vibe-local/main/install.ps1)
+Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/robustonian/vibe-local/main/install.ps1)
 ```
 
 **3.** 新しいターミナルを開いて起動:
@@ -110,7 +110,7 @@ ollama pull qwen3:8b
 **"vibe-coder.py が見つかりません"**
 ```bash
 # 再インストール
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 **モデルを変更したい**
@@ -146,12 +146,12 @@ Mac（まっく）や Windows（ういんどうず）で、AI（えーあい）�
 
 *Mac / Linux / Windows(WSL) のとき:*
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 *Windows (PowerShell) のとき:*
 ```powershell
-Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/ochyai/vibe-local/main/install.ps1)
+Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/robustonian/vibe-local/main/install.ps1)
 ```
 
 **3.** あたらしい ターミナルを ひらいて、これを うつ：
@@ -232,12 +232,12 @@ No login. No Node.js. No proxy process. 15 built-in tools, sub-agents, image/PDF
 
 *For Mac / Linux / Windows(WSL):*
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 *For Windows (PowerShell natively):*
 ```powershell
-Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/ochyai/vibe-local/main/install.ps1)
+Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/robustonian/vibe-local/main/install.ps1)
 ```
 
 **3.** Open a new terminal and run:
@@ -292,7 +292,7 @@ ollama pull qwen3:8b
 **"vibe-coder.py not found"**
 ```bash
 # Reinstall
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 **Change model**
@@ -334,12 +334,12 @@ vibe-local → vibe-coder.py (开源, 纯Python标准库, ~5200行) → Ollama (
 
 *Mac / Linux / Windows(WSL) 环境:*
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 *Windows (PowerShell) 环境:*
 ```powershell
-Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/ochyai/vibe-local/main/install.ps1)
+Invoke-Expression (Invoke-RestMethod -Uri https://raw.githubusercontent.com/robustonian/vibe-local/main/install.ps1)
 ```
 
 **3.** 打开新终端并运行：
@@ -394,7 +394,7 @@ ollama pull qwen3:8b
 **"vibe-coder.py 未找到"**
 ```bash
 # 重新安装
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 ```
 
 **更换模型**
@@ -686,7 +686,7 @@ vibe-local offers normal mode (confirms each action) and auto-approve mode (`-y`
 
 ```bash
 # 1. Pre-install on venue computers (while online)
-curl -fsSL https://raw.githubusercontent.com/ochyai/vibe-local/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robustonian/vibe-local/main/install.sh | bash
 
 # 2. Pre-download models (for offline use)
 ollama pull qwen3:8b          # For 16GB machines
