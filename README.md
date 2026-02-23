@@ -17,7 +17,7 @@
 
 > **Free AI Coding Agent — Offline, Local, Open Source**
 >
-> Python + Ollama only. No API keys. No cloud. No cost.
+> Single-file Python agent, stdlib only, zero dependencies. No API keys. No cloud. No cost.
 
 オフラインのワークショップでAIエージェントを使って学習者をサポートしたり、有料プランに未加入の学生がエージェントコーディングを練習したり、ネットワークのない環境で自然言語を使ってターミナル操作を学んだり――そんな場面を想定した、非営利の研究・教育目的のユーティリティツールです。
 
@@ -34,8 +34,10 @@ Built for offline workshops where instructors support learners with AI agents, f
 MacやWindows、LinuxにコマンドをコピペするだけでAIがコードを書いてくれる環境。
 ネットワーク不要・完全無料。**Python + Ollama だけで動く**完全OSSのコーディングエージェント。
 
+**エージェントのコア `vibe-coder.py` は Python 標準ライブラリだけで書かれた単一ファイルです。** pip install 不要、外部パッケージ依存ゼロ。ソースコードはそのまま読めるため、AIコーディングエージェントの仕組みを学ぶ教材としても、研究のベースラインとしても使えます。すべてがオープンソース (MIT) で公開されています。
+
 ```
-vibe-local → vibe-coder.py (OSS, Python stdlib only) → Ollama (直接通信)
+vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200行) → Ollama (直接通信)
 ```
 
 ログイン不要・Node.js不要・プロキシプロセス不要。15個の内蔵ツール、サブエージェント、画像・PDF読み取り対応。577テスト。
@@ -134,6 +136,8 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 Mac（まっく）や Windows（ういんどうず）で、AI（えーあい）が コードを かいて くれる どうぐ です。
 インターネットが なくても つかえます。おかねも かかりません。
 
+プログラムは Python（パイソン）の きほん きのう だけで できています。むずかしい インストールは いりません。ソースコードは だれでも よめて、べんきょうに つかえます。ぜんぶ オープンソースです。
+
 ### いれかた（3つの ステップ）
 
 **1.** ターミナルを ひらく（Mac: `Cmd+Space` → 「ターミナル」 / Windows: PowerShellを ひらく）
@@ -212,8 +216,10 @@ AIは かんぺきでは ありません。まちがった コマンドを う�
 A free AI coding environment you can set up with a single command on your Mac, Windows, or Linux.
 No network required. Completely free. **Python + Ollama only** — a fully open-source coding agent.
 
+**The core agent `vibe-coder.py` is a single file written entirely with the Python standard library.** No pip install needed. Zero external dependencies. The source code is human-readable as-is, making it ideal as teaching material for understanding how AI coding agents work, or as a research baseline. Everything is open source (MIT).
+
 ```
-vibe-local → vibe-coder.py (OSS, Python stdlib only) → Ollama (direct)
+vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200 lines) → Ollama (direct)
 ```
 
 No login. No Node.js. No proxy process. 15 built-in tools, sub-agents, image/PDF reading. 577 tests.
@@ -312,8 +318,10 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 在Mac、Windows 或 Linux上只需复制粘贴一个命令，AI就能帮你写代码。
 无需网络，完全免费。**Python + Ollama** 打造的完全开源编程代理。
 
+**核心代理 `vibe-coder.py` 是仅使用 Python 标准库编写的单一文件。** 无需 pip install，零外部依赖。源代码直接可读，非常适合作为学习AI编程代理工作原理的教材或研究基线。一切以开源 (MIT) 形式公开。
+
 ```
-vibe-local → vibe-coder.py (开源, 纯Python标准库) → Ollama (直接通信)
+vibe-local → vibe-coder.py (开源, 纯Python标准库, ~5200行) → Ollama (直接通信)
 ```
 
 无需登录、无需Node.js、无需代理进程。15个内置工具、子代理、图像/PDF读取支持。577项测试。
