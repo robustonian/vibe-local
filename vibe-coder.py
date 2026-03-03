@@ -5121,78 +5121,86 @@ def main():
     client = OllamaClient(config)
     ok, models = client.check_connection()
     if not ok:
-        print(f"\n{C.RED}Ollama (the local AI engine) is not running.{C.RESET}")
-        if platform.system() == "Darwin":
-            print(f"{C.DIM}Look for the llama icon in your menu bar, or open the Ollama app.{C.RESET}")
+        # API_KEY が設定されていれば OpenAI 互換 API を使用するので Ollama は不要
+        if config.api_key:
+            # OpenAI 互換 API を使用するので継続
+            pass
         else:
-            print(f"{C.DIM}Start it by running this in another terminal:  ollama serve{C.RESET}")
-        # Try to auto-start Ollama on macOS and Linux
-        if shutil.which("ollama"):
-            try:
-                ans = "y" if config.yes_mode else input(
-                    f"{_ansi(chr(27)+'[38;5;51m')}Try to start Ollama automatically? [Y/n]: {C.RESET}"
-                ).strip().lower()
-                if ans in ("", "y", "yes"):
-                    if platform.system() == "Darwin":
-                        # Try macOS app first, fall back to CLI
-                        try:
-                            subprocess.Popen(
-                                ["open", "-a", "Ollama"],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            )
-                        except Exception:
+            print(f"\n{C.RED}Ollama (the local AI engine) is not running.{C.RESET}")
+            if platform.system() == "Darwin":
+                print(f"{C.DIM}Look for the llama icon in your menu bar, or open the Ollama app.{C.RESET}")
+            else:
+                print(f"{C.DIM}Start it by running this in another terminal:  ollama serve{C.RESET}")
+            # Try to auto-start Ollama on macOS and Linux
+            if shutil.which("ollama"):
+                try:
+                    ans = "y" if config.yes_mode else input(
+                        f"{_ansi(chr(27)+'[38;5;51m')}Try to start Ollama automatically? [Y/n]: {C.RESET}"
+                    ).strip().lower()
+                    if ans in ("", "y", "yes"):
+                        if platform.system() == "Darwin":
+                            # Try macOS app first, fall back to CLI
+                            try:
+                                subprocess.Popen(
+                                    ["open", "-a", "Ollama"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                )
+                            except Exception:
+                                subprocess.Popen(
+                                    ["ollama", "serve"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True,
+                                )
+                        else:
                             subprocess.Popen(
                                 ["ollama", "serve"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True,
                             )
-                    else:
-                        subprocess.Popen(
-                            ["ollama", "serve"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True,
-                        )
-                    print(f"{_ansi(chr(27)+'[38;5;51m')}Starting Ollama... waiting up to 10s{C.RESET}")
-                    for _wait in range(10):
-                        time.sleep(1)
-                        ok, models = client.check_connection()
-                        if ok:
-                            print(f"{C.GREEN}Ollama started successfully!{C.RESET}")
-                            break
-            except (EOFError, KeyboardInterrupt):
-                print()
-            except Exception:
-                pass
-        if not ok:
-            sys.exit(1)
-
-    model_ok = client.check_model(config.model, available_models=models)
-
-    if not model_ok:
-        print(f"\n{C.YELLOW}The AI model '{config.model}' hasn't been downloaded yet.{C.RESET}")
-        if models:
-            print(f"{C.DIM}Models already downloaded: {', '.join(models)}{C.RESET}")
-        else:
-            print(f"{C.DIM}No models downloaded yet.{C.RESET}")
-        do_pull = False
-        if config.yes_mode:
-            do_pull = True
-        else:
-            try:
-                ans = input(f"{C.CYAN}Download '{config.model}' now? (may be several GB) [Y/n]: {C.RESET}").strip().lower()
-                do_pull = ans in ("", "y", "yes")
-            except (EOFError, KeyboardInterrupt):
-                print()
-        if do_pull:
-            print(f"{C.CYAN}Downloading {config.model}... (this may take a few minutes){C.RESET}")
-            if client.pull_model(config.model):
-                print(f"{C.GREEN}Download complete: {config.model}{C.RESET}")
-                model_ok = True
-            else:
-                print(f"{C.RED}Download failed. Try manually:  ollama pull {config.model}{C.RESET}")
+                        print(f"{_ansi(chr(27)+'[38;5;51m')}Starting Ollama... waiting up to 10s{C.RESET}")
+                        for _wait in range(10):
+                            time.sleep(1)
+                            ok, models = client.check_connection()
+                            if ok:
+                                print(f"{C.GREEN}Ollama started successfully!{C.RESET}")
+                                break
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                except Exception:
+                    pass
+            if not ok:
                 sys.exit(1)
-        else:
-            print(f"{C.DIM}Skipping download. The AI may not work until the model is downloaded.{C.RESET}")
+
+    # モデルチェックは Ollama 使用時のみ実行（API_KEY あればスキップ）
+    model_ok = True
+    if not config.api_key:
+        model_ok = client.check_model(config.model, available_models=models)
+
+        if not model_ok:
+            print(f"\n{C.YELLOW}The AI model '{config.model}' hasn't been downloaded yet.{C.RESET}")
+            if models:
+                print(f"{C.DIM}Models already downloaded: {', '.join(models)}{C.RESET}")
+            else:
+                print(f"{C.DIM}No models downloaded yet.{C.RESET}")
+            do_pull = False
+            if config.yes_mode:
+                do_pull = True
+            else:
+                try:
+                    ans = input(f"{C.CYAN}Download '{config.model}' now? (may be several GB) [Y/n]: {C.RESET}").strip().lower()
+                    do_pull = ans in ("", "y", "yes")
+                except (EOFError, KeyboardInterrupt):
+                    print()
+            if do_pull:
+                print(f"{C.CYAN}Downloading {config.model}... (this may take a few minutes){C.RESET}")
+                if client.pull_model(config.model):
+                    print(f"{C.GREEN}Download complete: {config.model}{C.RESET}")
+                    model_ok = True
+                else:
+                    print(f"{C.RED}Download failed. Try manually:  ollama pull {config.model}{C.RESET}")
+                    sys.exit(1)
+            else:
+                print(f"{C.DIM}Skipping download. The AI may not work until the model is downloaded.{C.RESET}")
 
     # Setup components
     system_prompt = _build_system_prompt(config)
