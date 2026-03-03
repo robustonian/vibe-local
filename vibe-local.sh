@@ -162,10 +162,15 @@ check_network() {
 AUTO_MODE=0
 YES_FLAG=0
 PROMPT_FLAG=0
+VERSION_FLAG=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --version)
+            VERSION_FLAG=1
+            shift
+            ;;
         --auto)
             AUTO_MODE=1
             shift
@@ -202,6 +207,22 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --- バージョン表示 ---
+if [ "$VERSION_FLAG" -eq 1 ]; then
+    # Try to get version from vibe-coder.py
+    if [ -f "$VIBE_CODER_SCRIPT" ]; then
+        _ver=$(grep -E '^__version__ *= *' "$VIBE_CODER_SCRIPT" | head -1 | sed 's/.*= *"\([^"]*\)".*/\1/')
+        if [ -n "$_ver" ]; then
+            echo "vibe-local v$_ver"
+        else
+            echo "vibe-local"
+        fi
+    else
+        echo "vibe-local"
+    fi
+    exit 0
+fi
 
 # --- 自動判定モード ---
 if [ "$AUTO_MODE" -eq 1 ]; then
