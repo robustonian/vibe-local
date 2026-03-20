@@ -1,7 +1,7 @@
 #!/bin/bash
 # vibe-local.sh
-# ローカルLLM (Ollama) で vibe-coder を起動するスクリプト
-# Python + Ollama だけで動作 — Node.js不要、Claude Code不要、プロキシ不要
+# OpenAI互換バックエンド (既定はOllama) で vibe-coder を起動するスクリプト
+# Python + OpenAI-compatible API で動作 — Node.js不要、Claude Code不要、プロキシ不要
 #
 # NOTE: This project is NOT affiliated with, endorsed by, or associated with Anthropic.
 #
@@ -25,6 +25,17 @@ chmod 700 "$STATE_DIR" 2>/dev/null || true
 CONFIG_FILE="${HOME}/.config/vibe-local/config"
 LIB_DIR="${HOME}/.local/lib/vibe-local"
 VIBE_CODER_SCRIPT="${LIB_DIR}/vibe-coder.py"
+
+# Preserve process environment overrides before applying defaults/file config.
+_ENV_OLLAMA_HOST="${OLLAMA_HOST-}"
+_ENV_API_KEY="${API_KEY-}"
+_ENV_VIBE_LOCAL_API_KEY="${VIBE_LOCAL_API_KEY-}"
+_ENV_VIBE_CODER_MODEL="${VIBE_CODER_MODEL-}"
+_ENV_VIBE_LOCAL_MODEL="${VIBE_LOCAL_MODEL-}"
+_ENV_VIBE_CODER_SIDECAR="${VIBE_CODER_SIDECAR-}"
+_ENV_VIBE_LOCAL_SIDECAR_MODEL="${VIBE_LOCAL_SIDECAR_MODEL-}"
+_ENV_VIBE_CODER_DEBUG="${VIBE_CODER_DEBUG-}"
+_ENV_VIBE_LOCAL_DEBUG="${VIBE_LOCAL_DEBUG-}"
 
 # デフォルト値
 MODEL=""
@@ -65,6 +76,18 @@ if [ -f "$_DOTENV_FILE" ] && [ ! -L "$_DOTENV_FILE" ]; then
 fi
 unset _DOTENV_FILE
 
+# Environment variables override config and .env (CLI flags still win later).
+[ -n "$_ENV_OLLAMA_HOST" ] && OLLAMA_HOST="$_ENV_OLLAMA_HOST"
+[ -n "$_ENV_VIBE_CODER_MODEL" ] && MODEL="$_ENV_VIBE_CODER_MODEL"
+[ -n "$_ENV_VIBE_LOCAL_MODEL" ] && MODEL="$_ENV_VIBE_LOCAL_MODEL"
+[ -n "$_ENV_VIBE_CODER_SIDECAR" ] && SIDECAR_MODEL="$_ENV_VIBE_CODER_SIDECAR"
+[ -n "$_ENV_VIBE_LOCAL_SIDECAR_MODEL" ] && SIDECAR_MODEL="$_ENV_VIBE_LOCAL_SIDECAR_MODEL"
+([ "${_ENV_VIBE_CODER_DEBUG:-}" = "1" ] || [ "${_ENV_VIBE_LOCAL_DEBUG:-}" = "1" ]) && VIBE_LOCAL_DEBUG=1
+[ -n "$_ENV_API_KEY" ] && VIBE_LOCAL_API_KEY="$_ENV_API_KEY"
+[ -n "$_ENV_VIBE_LOCAL_API_KEY" ] && VIBE_LOCAL_API_KEY="$_ENV_VIBE_LOCAL_API_KEY"
+unset _ENV_OLLAMA_HOST _ENV_API_KEY _ENV_VIBE_LOCAL_API_KEY _ENV_VIBE_CODER_MODEL _ENV_VIBE_LOCAL_MODEL
+unset _ENV_VIBE_CODER_SIDECAR _ENV_VIBE_LOCAL_SIDECAR_MODEL _ENV_VIBE_CODER_DEBUG _ENV_VIBE_LOCAL_DEBUG
+
 # [SEC] Validate OLLAMA_HOST - require http/https scheme, reject credential injection
 # Allows any host (localhost or remote), rejects user:pass@ injection
 _host_valid=0
@@ -99,59 +122,6 @@ if [ ! -f "$VIBE_CODER_SCRIPT" ]; then
         exit 1
     fi
 fi
-
-# --- ollama が起動しているか確認・起動 ---
-ensure_ollama() {
-    # Check if backend is already reachable (Ollama /api/tags or OpenAI /v1/models)
-    if curl -s --max-time 2 "$OLLAMA_HOST/api/tags" &>/dev/null; then
-        return 0
-    fi
-    if curl -s --max-time 2 "$OLLAMA_HOST/v1/models" &>/dev/null; then
-        return 0
-    fi
-
-    # For remote (non-localhost) endpoints, we cannot auto-start the server
-    if [[ ! "$OLLAMA_HOST" =~ ^http://(localhost|127\.0\.0\.1|\[::1\]) ]]; then
-        echo "❌ リモートエンドポイント '$OLLAMA_HOST' に接続できません。"
-        echo ""
-        echo "エンドポイントが起動していることを確認してください。"
-        return 1
-    fi
-
-    if ! command -v ollama &>/dev/null; then
-        echo "❌ エラー: ollama コマンドが見つかりません"
-        echo ""
-        echo "インストール方法:"
-        echo "  macOS: brew install ollama  または  https://ollama.com/download"
-        echo "  Linux: curl -fsSL https://ollama.com/install.sh | sh"
-        return 1
-    fi
-
-    echo "🦙 ollama を起動中..."
-    if [[ "$(uname)" == "Darwin" ]]; then
-        open -a Ollama 2>/dev/null || (ollama serve &>/dev/null &)
-    else
-        ollama serve &>/dev/null &
-    fi
-
-    for i in $(seq 1 15); do
-        printf "\r  🦙 ollama 起動待ち... %ds " "$((i * 2))"
-        sleep 2
-        if curl -s --max-time 2 "$OLLAMA_HOST/api/tags" &>/dev/null; then
-            printf "\r%-40s\n" ""
-            echo "✅ ollama 起動完了"
-            return 0
-        fi
-    done
-    printf "\r%-40s\n" ""
-
-    echo "❌ エラー: ollama が起動できませんでした"
-    echo ""
-    echo "対処法:"
-    echo "  macOS: Ollama アプリを手動で起動してください"
-    echo "  Linux: ollama serve を実行してください"
-    return 1
-}
 
 # --- ネットワーク接続チェック ---
 check_network() {
@@ -240,66 +210,14 @@ if [ "$AUTO_MODE" -eq 1 ]; then
     fi
 fi
 
-# --- ローカルモードで起動 ---
-if ! ensure_ollama; then
-    echo ""
-    echo "ollama が起動できないため終了します。"
-    exit 1
-fi
-
 # モデル引数を組み立て
 MODEL_ARGS=()
 if [ -n "$MODEL" ]; then
     MODEL_ARGS+=(--model "$MODEL")
 fi
 
-# モデルがロード済みか確認 (Ollama localhost の場合のみ)
-# Two-stage check: Python JSON first, grep -F fallback
-if [ -n "$MODEL" ] && [[ "$OLLAMA_HOST" =~ ^http://(localhost|127\.0\.0\.1|\[::1\]) ]]; then
-    _model_found=0
-    _api_response="$(curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null)"
-    if [ -n "$_api_response" ]; then
-        # Try Python JSON parsing for exact match
-        # [SEC] Pass MODEL via env var, not interpolation (prevents injection)
-        if echo "$_api_response" | TARGET_MODEL="$MODEL" python3 -c "
-import sys,json,os
-try:
-    d=json.load(sys.stdin)
-    names=[m['name'].strip() for m in d.get('models',[])]
-    want=os.environ['TARGET_MODEL'].strip()
-    found = want in names or want+':latest' in names
-    found = found or any(n.startswith(want+':') or n.startswith(want+'-') or n==want for n in names)
-    want_base = want.split(':')[0] if ':' in want else want
-    found = found or any(n.split(':')[0] == want_base for n in names)
-    sys.exit(0 if found else 1)
-except: sys.exit(1)
-" 2>/dev/null; then
-            _model_found=1
-        # Fallback: simple grep (less precise but handles edge cases)
-        elif echo "$_api_response" | grep -qF "$MODEL"; then
-            _model_found=1
-        fi
-    fi
-    if [ "$_model_found" -eq 0 ]; then
-        echo "❌ AIモデル $MODEL がまだダウンロードされていません"
-        echo ""
-        echo "ダウンロードするには、以下のコマンドを貼り付けてEnterを押してください:"
-        echo "  ollama pull \"$MODEL\""
-        echo ""
-        echo "(数分～数十分かかります。完了後に再度 vibe-local を実行してください)"
-        echo ""
-        echo "インストール済みモデル:"
-        curl -s "$OLLAMA_HOST/api/tags" 2>/dev/null | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for m in data.get('models', []):
-        print(f\"  - {m['name']}\")
-except: pass
-" 2>/dev/null || echo "  (一覧取得失敗)"
-        exit 1
-    fi
-fi
+# 接続確認・モデル確認は vibe-coder.py 側で一元的に行う。
+# ここで Ollama 前提の分岐をしないことで、OpenAI互換APIでもそのまま起動できる。
 
 # --- パーミッション確認 ---
 PERM_ARGS=()
@@ -355,7 +273,7 @@ if [ "$PROMPT_FLAG" -eq 0 ]; then
     else
         echo " Model: (auto-detect)"
     fi
-    echo " Ollama: $OLLAMA_HOST"
+    echo " Endpoint: $OLLAMA_HOST"
     echo " Engine: vibe-coder.py (direct, no proxy)"
     echo "============================================"
     echo ""

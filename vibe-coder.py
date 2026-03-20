@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vibe-coder — Open-source coding agent powered by Ollama
+vibe-coder — Open-source coding agent powered by Ollama and OpenAI-compatible APIs
 Replaces Claude Code CLI: no login, no Node.js, no proxy, fully OSS.
 
 Usage:
@@ -134,7 +134,7 @@ def _get_terminal_width():
 def _probe_is_ollama(host, timeout=1):
     """Return True if host is genuine Ollama (GET / returns 'Ollama is running')."""
     try:
-        req = urllib.request.Request(f"{host}/")
+        req = urllib.request.Request(f"{_backend_root_url(host)}/")
         resp = urllib.request.urlopen(req, timeout=timeout)
         body = resp.read(64).decode("utf-8", errors="ignore")
         resp.close()
@@ -162,6 +162,65 @@ def _truncate_to_display_width(text, max_width):
             return text[:i] + "..."
         w += cw
     return text
+
+
+def _is_local_hostname(hostname):
+    """Return True for localhost-style hostnames."""
+    return hostname in ("localhost", "127.0.0.1", "::1")
+
+
+def _rebuild_url(parsed, path):
+    """Rebuild URL without query/fragment noise and with a normalized path."""
+    clean_path = (path or "").rstrip("/")
+    if clean_path == "/":
+        clean_path = ""
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, clean_path, "", "", ""))
+
+
+def _normalize_backend_base_url(url):
+    """Normalize endpoint base URL while preserving an optional path such as /v1."""
+    parsed = urllib.parse.urlparse(url)
+    return _rebuild_url(parsed, parsed.path)
+
+
+def _backend_root_url(url):
+    """Return the backend root URL used for Ollama-specific endpoints."""
+    parsed = urllib.parse.urlparse(_normalize_backend_base_url(url))
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    return _rebuild_url(parsed, path)
+
+
+def _backend_api_base_url(url):
+    """Return the API base URL that should contain /v1 exactly once."""
+    parsed = urllib.parse.urlparse(_normalize_backend_base_url(url))
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1"):
+        path = f"{path}/v1" if path else "/v1"
+    return _rebuild_url(parsed, path)
+
+
+def _backend_root_endpoint(url, endpoint):
+    """Build an Ollama-specific endpoint from a backend base URL."""
+    return f"{_backend_root_url(url)}{endpoint}"
+
+
+def _backend_api_endpoint(url, endpoint):
+    """Build an OpenAI-compatible endpoint from a backend base URL."""
+    return f"{_backend_api_base_url(url)}{endpoint}"
+
+
+def _is_local_ollama_target(url):
+    """Return True when the endpoint points at the default local Ollama address."""
+    parsed = urllib.parse.urlparse(_backend_root_url(url))
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return (
+        parsed.scheme == "http"
+        and _is_local_hostname(parsed.hostname)
+        and port == 11434
+        and parsed.path in ("", "/")
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -331,16 +390,16 @@ class Config:
                 argv.append(a)
         parser = argparse.ArgumentParser(
             prog="vibe-coder",
-            description="Open-source coding agent powered by Ollama",
+            description="Open-source coding agent for Ollama and OpenAI-compatible backends",
         )
         parser.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive)")
-        parser.add_argument("-m", "--model", help="Ollama model name")
+        parser.add_argument("-m", "--model", help="Model name")
         parser.add_argument("-y", "--yes", action="store_true", help="Auto-approve all tool calls")
         parser.add_argument("--debug", action="store_true", help="Debug mode")
         parser.add_argument("--resume", action="store_true", help="Resume last session")
         parser.add_argument("--session-id", help="Resume specific session")
         parser.add_argument("--list-sessions", action="store_true", help="List saved sessions")
-        parser.add_argument("--ollama-host", help="Ollama host URL")
+        parser.add_argument("--ollama-host", help="API endpoint URL")
         parser.add_argument("--max-tokens", type=int, help="Max output tokens")
         parser.add_argument("--temperature", type=float, help="Sampling temperature")
         parser.add_argument("--context-window", type=int, help="Context window size")
@@ -492,7 +551,7 @@ class Config:
         # Try Ollama /api/tags first
         try:
             req = urllib.request.Request(
-                f"{self.ollama_host}/api/tags", headers=headers
+                _backend_root_endpoint(self.ollama_host, "/api/tags"), headers=headers
             )
             resp = urllib.request.urlopen(req, timeout=3)
             try:
@@ -505,7 +564,7 @@ class Config:
         # Fallback: OpenAI-compatible /v1/models
         try:
             req = urllib.request.Request(
-                f"{self.ollama_host}/v1/models", headers=headers
+                _backend_api_endpoint(self.ollama_host, "/models"), headers=headers
             )
             resp = urllib.request.urlopen(req, timeout=3)
             try:
@@ -582,7 +641,7 @@ class Config:
             if parsed.port:
                 clean += f":{parsed.port}"
             self.ollama_host = clean
-        self.ollama_host = self.ollama_host.rstrip("/")
+        self.ollama_host = _normalize_backend_base_url(self.ollama_host)
         # Validate numeric settings with reasonable bounds
         if self.context_window <= 0 or self.context_window > 1_048_576:
             self.context_window = self.DEFAULT_CONTEXT_WINDOW
@@ -844,14 +903,16 @@ IMPORTANT — This is Windows (NOT Linux/macOS):
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# OllamaClient — Direct communication with Ollama OpenAI-compatible API
+# OllamaClient — Direct communication with Ollama and OpenAI-compatible APIs
 # ════════════════════════════════════════════════════════════════════════════════
 
 class OllamaClient:
-    """Communicates with Ollama via /v1/chat/completions."""
+    """Communicates with Ollama and OpenAI-compatible APIs via /v1/chat/completions."""
 
     def __init__(self, config):
-        self.base_url = config.ollama_host
+        self.base_url = _normalize_backend_base_url(config.ollama_host)
+        self.root_url = _backend_root_url(self.base_url)
+        self.api_base_url = _backend_api_base_url(self.base_url)
         self.api_key = config.api_key
         self.max_tokens = config.max_tokens
         self.temperature = config.temperature
@@ -873,7 +934,7 @@ class OllamaClient:
             return self._ollama_detected
         try:
             req = urllib.request.Request(
-                f"{self.base_url}/api/tags",
+                f"{self.root_url}/api/tags",
                 headers=self._make_headers(),
             )
             resp = urllib.request.urlopen(req, timeout=3)
@@ -883,11 +944,36 @@ class OllamaClient:
             self._ollama_detected = False
         return self._ollama_detected
 
+    def is_ollama(self):
+        """Public wrapper for backend detection."""
+        return self._is_ollama()
+
+    def is_local_ollama_target(self):
+        """Return True when the configured endpoint is the local Ollama default."""
+        return _is_local_ollama_target(self.base_url)
+
+    def backend_name(self):
+        """Return a user-facing backend name."""
+        return "Ollama" if self._is_ollama() else "OpenAI-compatible API"
+
+    def missing_model_hint(self, model_name):
+        """Return the most useful remediation hint for a missing model."""
+        if self._is_ollama():
+            return f"Download it:  ollama pull {model_name}"
+        return "Set MODEL to one of the model IDs exposed by the configured API endpoint."
+
+    def missing_model_error(self, model_name):
+        """Return a backend-aware missing-model error message."""
+        if self._is_ollama():
+            return f"Model '{model_name}' not found. Run: ollama pull {model_name}"
+        return (f"Model '{model_name}' not found on the configured API endpoint. "
+                "Check /models or set MODEL to one of the exposed IDs.")
+
     def check_connection(self, retries=3):
         """Check if backend is reachable. Returns (ok, model_list).
         Tries Ollama /api/tags first, falls back to OpenAI-compatible /v1/models."""
         if self._is_ollama():
-            url = f"{self.base_url}/api/tags"
+            url = f"{self.root_url}/api/tags"
             for attempt in range(retries):
                 try:
                     req = urllib.request.Request(url, headers=self._make_headers())
@@ -907,7 +993,7 @@ class OllamaClient:
         for attempt in range(retries):
             try:
                 req = urllib.request.Request(
-                    f"{self.base_url}/v1/models",
+                    f"{self.api_base_url}/models",
                     headers=self._make_headers(),
                 )
                 resp = urllib.request.urlopen(req, timeout=5)
@@ -951,7 +1037,7 @@ class OllamaClient:
         if not self._is_ollama():
             print(f"{C.YELLOW}[info] Non-Ollama backend — skipping pull for '{model_name}'.{C.RESET}")
             return False
-        url = f"{self.base_url}/api/pull"
+        url = f"{self.root_url}/api/pull"
         body = json.dumps({"name": model_name}).encode("utf-8")
         req = urllib.request.Request(
             url, data=body,
@@ -1020,14 +1106,14 @@ class OllamaClient:
 
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            f"{self.base_url}/v1/chat/completions",
+            f"{self.api_base_url}/chat/completions",
             data=body,
             headers=self._make_headers(),
             method="POST",
         )
 
         if self.debug:
-            print(f"{C.DIM}[debug] POST {self.base_url}/v1/chat/completions "
+            print(f"{C.DIM}[debug] POST {self.api_base_url}/chat/completions "
                   f"model={model} msgs={len(messages)} tools={len(tools or [])} "
                   f"stream={stream}{C.RESET}", file=sys.stderr)
 
@@ -1042,7 +1128,7 @@ class OllamaClient:
             finally:
                 e.close()
             if e.code == 404:
-                raise RuntimeError(f"Model '{model}' not found. Run: ollama pull {model}") from e
+                raise RuntimeError(self.missing_model_error(model)) from e
             elif e.code == 400:
                 if "tool" in error_body.lower() or "function" in error_body.lower():
                     raise RuntimeError(
@@ -1055,9 +1141,9 @@ class OllamaClient:
                         f"Use /compact or /clear. Error: {error_body[:200]}"
                     ) from e
                 else:
-                    raise RuntimeError(f"Bad request to Ollama (400): {error_body}") from e
+                    raise RuntimeError(f"Bad request to {self.backend_name()} (400): {error_body}") from e
             else:
-                raise RuntimeError(f"Ollama HTTP error {e.code}: {error_body}") from e
+                raise RuntimeError(f"{self.backend_name()} HTTP error {e.code}: {error_body}") from e
 
         if stream:
             return self._iter_sse(resp)
@@ -1069,7 +1155,7 @@ class OllamaClient:
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
-                raise RuntimeError(f"Invalid JSON from Ollama: {raw[:200]}") from e
+                raise RuntimeError(f"Invalid JSON from {self.backend_name()}: {raw[:200]}") from e
             if self.debug:
                 usage = data.get("usage", {})
                 print(f"{C.DIM}[debug] Response: prompt={usage.get('prompt_tokens',0)} "
@@ -1126,10 +1212,12 @@ class OllamaClient:
 
     def tokenize(self, model, text):
         """Count tokens via Ollama /api/tokenize. Falls back to len//4."""
+        if not self._is_ollama():
+            return len(text) // 4
         try:
             body = json.dumps({"model": model, "text": text}).encode("utf-8")
             req = urllib.request.Request(
-                f"{self.base_url}/api/tokenize",
+                f"{self.root_url}/api/tokenize",
                 data=body,
                 headers=self._make_headers(),
                 method="POST",
@@ -4166,8 +4254,12 @@ class TUI:
         print(f"  📁 {info_dim}CWD{C.RESET}    {C.WHITE}{os.getcwd()}{C.RESET}")
 
         if not model_ok:
-            print(f"\n  {C.RED}⚠ Model '{config.model}' not downloaded yet.{C.RESET}")
-            print(f"  {C.DIM}  Download it:  ollama pull {config.model}{C.RESET}")
+            if _probe_is_ollama(config.ollama_host):
+                print(f"\n  {C.RED}⚠ Model '{config.model}' not downloaded yet.{C.RESET}")
+                print(f"  {C.DIM}  Download it:  ollama pull {config.model}{C.RESET}")
+            else:
+                print(f"\n  {C.RED}⚠ Model '{config.model}' is not available on this endpoint.{C.RESET}")
+                print(f"  {C.DIM}  Set MODEL to one of the IDs returned by /v1/models.{C.RESET}")
 
         print(sep_line)
         # Recommend -y mode if not already enabled
@@ -4797,7 +4889,10 @@ class Agent:
 
                 if response is None:
                     print(f"\n{C.RED}The AI didn't respond. It may still be loading or ran out of memory.{C.RESET}")
-                    print(f"{C.DIM}Try again, or restart Ollama if this keeps happening.{C.RESET}")
+                    if self.client.is_ollama():
+                        print(f"{C.DIM}Try again, or restart Ollama if this keeps happening.{C.RESET}")
+                    else:
+                        print(f"{C.DIM}Try again, or verify that the configured API endpoint is still healthy.{C.RESET}")
                     break
 
                 # 2. Parse response
@@ -5042,8 +5137,11 @@ class Agent:
                         pass
                 print(f"\n{C.RED}HTTP {e.code} {e.reason}: {body}{C.RESET}")
                 if e.code == 404:
-                    print(f"{C.DIM}The model '{self.config.model}' may not be downloaded yet.{C.RESET}")
-                    print(f"{C.DIM}Download it:  ollama pull {self.config.model}{C.RESET}")
+                    if self.client.is_ollama():
+                        print(f"{C.DIM}The model '{self.config.model}' may not be downloaded yet.{C.RESET}")
+                    else:
+                        print(f"{C.DIM}The model '{self.config.model}' may not be available on this endpoint.{C.RESET}")
+                    print(f"{C.DIM}{self.client.missing_model_hint(self.config.model)}{C.RESET}")
                 elif e.code == 400:
                     print(f"{C.DIM}The request was rejected — the model name or context may be invalid.{C.RESET}")
                 break
@@ -5053,8 +5151,12 @@ class Agent:
                     response.close()
                 if text:
                     self.session.add_assistant_message(text)
-                print(f"\n{C.RED}Lost connection to Ollama (the local AI engine).{C.RESET}")
-                print(f"{C.DIM}It may have crashed or been closed. Restart it:  ollama serve{C.RESET}")
+                if self.client.is_ollama():
+                    print(f"\n{C.RED}Lost connection to Ollama (the local AI engine).{C.RESET}")
+                    print(f"{C.DIM}It may have crashed or been closed. Restart it:  ollama serve{C.RESET}")
+                else:
+                    print(f"\n{C.RED}Lost connection to the configured API endpoint.{C.RESET}")
+                    print(f"{C.DIM}Check that {self.client.api_base_url} is reachable and try again.{C.RESET}")
                 print(f"{C.DIM}Your conversation is still here — just try again after restarting.{C.RESET}")
                 break
             except Exception as e:
@@ -5117,15 +5219,11 @@ def main():
     tui = TUI(config)
     tui.banner(config, model_ok=True)  # show banner before connection check
 
-    # Check Ollama connection
+    # Check backend connection
     client = OllamaClient(config)
     ok, models = client.check_connection()
     if not ok:
-        # API_KEY が設定されていれば OpenAI 互換 API を使用するので Ollama は不要
-        if config.api_key:
-            # OpenAI 互換 API を使用するので継続
-            pass
-        else:
+        if client.is_local_ollama_target():
             print(f"\n{C.RED}Ollama (the local AI engine) is not running.{C.RESET}")
             if platform.system() == "Darwin":
                 print(f"{C.DIM}Look for the llama icon in your menu bar, or open the Ollama app.{C.RESET}")
@@ -5170,37 +5268,54 @@ def main():
                     pass
             if not ok:
                 sys.exit(1)
+        else:
+            parsed = urllib.parse.urlparse(client.api_base_url)
+            print(f"\n{C.RED}Cannot connect to the configured API endpoint.{C.RESET}")
+            print(f"{C.DIM}Endpoint: {config.ollama_host}{C.RESET}")
+            if _is_local_hostname(parsed.hostname):
+                print(f"{C.DIM}Start the local OpenAI-compatible server for this endpoint, then try again.{C.RESET}")
+            else:
+                print(f"{C.DIM}Check OLLAMA_HOST, API_KEY, and network access, then try again.{C.RESET}")
+            sys.exit(1)
 
-    # モデルチェックは Ollama 使用時のみ実行（API_KEY あればスキップ）
+    # Check model availability when the backend can tell us what it exposes.
     model_ok = True
-    if not config.api_key:
+    if client.is_ollama() or models:
         model_ok = client.check_model(config.model, available_models=models)
 
         if not model_ok:
-            print(f"\n{C.YELLOW}The AI model '{config.model}' hasn't been downloaded yet.{C.RESET}")
+            if client.is_ollama():
+                print(f"\n{C.YELLOW}The AI model '{config.model}' hasn't been downloaded yet.{C.RESET}")
+            else:
+                print(f"\n{C.YELLOW}The AI model '{config.model}' is not available on this endpoint.{C.RESET}")
             if models:
-                print(f"{C.DIM}Models already downloaded: {', '.join(models)}{C.RESET}")
+                print(f"{C.DIM}Models reported by the endpoint: {', '.join(models)}{C.RESET}")
             else:
-                print(f"{C.DIM}No models downloaded yet.{C.RESET}")
-            do_pull = False
-            if config.yes_mode:
-                do_pull = True
-            else:
-                try:
-                    ans = input(f"{C.CYAN}Download '{config.model}' now? (may be several GB) [Y/n]: {C.RESET}").strip().lower()
-                    do_pull = ans in ("", "y", "yes")
-                except (EOFError, KeyboardInterrupt):
-                    print()
-            if do_pull:
-                print(f"{C.CYAN}Downloading {config.model}... (this may take a few minutes){C.RESET}")
-                if client.pull_model(config.model):
-                    print(f"{C.GREEN}Download complete: {config.model}{C.RESET}")
-                    model_ok = True
+                print(f"{C.DIM}The endpoint did not report any models.{C.RESET}")
+            if client.is_ollama():
+                do_pull = False
+                if config.yes_mode:
+                    do_pull = True
                 else:
-                    print(f"{C.RED}Download failed. Try manually:  ollama pull {config.model}{C.RESET}")
-                    sys.exit(1)
+                    try:
+                        ans = input(f"{C.CYAN}Download '{config.model}' now? (may be several GB) [Y/n]: {C.RESET}").strip().lower()
+                        do_pull = ans in ("", "y", "yes")
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                if do_pull:
+                    print(f"{C.CYAN}Downloading {config.model}... (this may take a few minutes){C.RESET}")
+                    if client.pull_model(config.model):
+                        print(f"{C.GREEN}Download complete: {config.model}{C.RESET}")
+                        model_ok = True
+                    else:
+                        print(f"{C.RED}Download failed. Try manually:  ollama pull {config.model}{C.RESET}")
+                        sys.exit(1)
+                else:
+                    print(f"{C.DIM}Skipping download. The AI may not work until the model is downloaded.{C.RESET}")
             else:
-                print(f"{C.DIM}Skipping download. The AI may not work until the model is downloaded.{C.RESET}")
+                print(f"{C.DIM}{client.missing_model_hint(config.model)}{C.RESET}")
+                if config.prompt:
+                    sys.exit(1)
 
     # Setup components
     system_prompt = _build_system_prompt(config)
@@ -5372,10 +5487,13 @@ def main():
                             print(f"{C.DIM}Context window: {config.context_window} tokens{C.RESET}")
                         else:
                             avail = fresh_models if _ok else []
-                            print(f"{C.YELLOW}Model '{new_model}' is not downloaded yet.{C.RESET}")
+                            if client.is_ollama():
+                                print(f"{C.YELLOW}Model '{new_model}' is not downloaded yet.{C.RESET}")
+                            else:
+                                print(f"{C.YELLOW}Model '{new_model}' is not available on this endpoint.{C.RESET}")
                             if avail:
                                 _show_model_list(avail)
-                            print(f"{C.DIM}Download it:  ollama pull {new_model}{C.RESET}")
+                            print(f"{C.DIM}{client.missing_model_hint(new_model)}{C.RESET}")
                     else:
                         _ok, fresh_models = client.check_connection()
                         avail = fresh_models if _ok else []
@@ -5388,7 +5506,10 @@ def main():
                         if avail:
                             print(f"\n  {C.BOLD}Installed models:{C.RESET}")
                             _show_model_list(avail)
-                        print(f"\n  {C.DIM}Switch: /model <name>  |  Download: ollama pull <name>{C.RESET}")
+                        if client.is_ollama():
+                            print(f"\n  {C.DIM}Switch: /model <name>  |  Download: ollama pull <name>{C.RESET}")
+                        else:
+                            print(f"\n  {C.DIM}Switch: /model <name>{C.RESET}")
                         _tier_legend = (f"  {C.DIM}Tiers: "
                                         f"{_ansi(chr(27)+'[38;5;196m')}S{C.RESET}{C.DIM}=Frontier "
                                         f"{_ansi(chr(27)+'[38;5;208m')}A{C.RESET}{C.DIM}=Expert "

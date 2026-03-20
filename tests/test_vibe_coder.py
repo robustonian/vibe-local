@@ -122,11 +122,11 @@ class TestConfig:
         assert cfg.resume is True
         # The actual sanitization happens in Session.__init__
 
-    def test_validate_ollama_host_rejects_non_localhost(self):
+    def test_validate_ollama_host_allows_remote_https(self):
         cfg = vc.Config()
-        cfg.ollama_host = "http://evil.example.com:11434"
+        cfg.ollama_host = "https://api.example.com/v1"
         cfg._validate_ollama_host()
-        assert cfg.ollama_host == cfg.DEFAULT_OLLAMA_HOST
+        assert cfg.ollama_host == "https://api.example.com/v1"
 
     def test_validate_ollama_host_allows_localhost(self):
         cfg = vc.Config()
@@ -139,6 +139,12 @@ class TestConfig:
         cfg.ollama_host = "http://127.0.0.1:11434"
         cfg._validate_ollama_host()
         assert cfg.ollama_host == "http://127.0.0.1:11434"
+
+    def test_validate_ollama_host_strips_trailing_slash_after_v1(self):
+        cfg = vc.Config()
+        cfg.ollama_host = "https://api.example.com/v1/"
+        cfg._validate_ollama_host()
+        assert cfg.ollama_host == "https://api.example.com/v1"
 
     def test_load_config_file(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as f:
@@ -1230,6 +1236,14 @@ class TestOllamaClient:
         cfg.debug = False
         return vc.OllamaClient(cfg)
 
+    def _make_client_for_host(self, host):
+        cfg = vc.Config()
+        cfg.ollama_host = host
+        cfg.max_tokens = 1024
+        cfg.temperature = 0.7
+        cfg.debug = False
+        return vc.OllamaClient(cfg)
+
     def test_check_connection_error_handling(self):
         client = self._make_client()
         with mock.patch("urllib.request.urlopen", side_effect=Exception("connection refused")):
@@ -1247,6 +1261,46 @@ class TestOllamaClient:
             ok, models = client.check_connection()
         assert ok is True
         assert "qwen3:8b" in models
+
+    def test_check_connection_openai_base_url_without_v1(self):
+        client = self._make_client_for_host("https://api.example.com")
+
+        def fake_urlopen(req, timeout=0):
+            if req.full_url == "https://api.example.com/api/tags":
+                raise Exception("not ollama")
+            if req.full_url == "https://api.example.com/v1/models":
+                resp = mock.MagicMock()
+                resp.read.return_value = json.dumps({
+                    "data": [{"id": "preview/Kimi-K2.5"}]
+                }).encode()
+                return resp
+            raise AssertionError(req.full_url)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, models = client.check_connection()
+
+        assert ok is True
+        assert models == ["preview/Kimi-K2.5"]
+
+    def test_check_connection_openai_base_url_with_v1(self):
+        client = self._make_client_for_host("https://api.example.com/v1")
+
+        def fake_urlopen(req, timeout=0):
+            if req.full_url == "https://api.example.com/api/tags":
+                raise Exception("not ollama")
+            if req.full_url == "https://api.example.com/v1/models":
+                resp = mock.MagicMock()
+                resp.read.return_value = json.dumps({
+                    "data": [{"id": "preview/Kimi-K2.5"}]
+                }).encode()
+                return resp
+            raise AssertionError(req.full_url)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, models = client.check_connection()
+
+        assert ok is True
+        assert models == ["preview/Kimi-K2.5"]
 
     def test_check_model_found(self):
         client = self._make_client()
@@ -1279,6 +1333,18 @@ class TestOllamaClient:
         with mock.patch("urllib.request.urlopen", side_effect=error):
             with pytest.raises(RuntimeError, match="not found"):
                 client.chat("nonexistent", [{"role": "user", "content": "hi"}], stream=False)
+
+    def test_chat_uses_single_v1_suffix_when_host_already_has_v1(self):
+        client = self._make_client_for_host("https://api.example.com/v1")
+        client._ollama_detected = False
+        resp = mock.MagicMock()
+        resp.read.return_value = b"{}"
+
+        with mock.patch("urllib.request.urlopen", return_value=resp) as mocked_urlopen:
+            client.chat("preview/Kimi-K2.5", [{"role": "user", "content": "hi"}], stream=False)
+
+        request = mocked_urlopen.call_args[0][0]
+        assert request.full_url == "https://api.example.com/v1/chat/completions"
 
     def test_tokenize_fallback(self):
         client = self._make_client()

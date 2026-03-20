@@ -32,12 +32,12 @@ Built for offline workshops where instructors support learners with AI agents, f
 ### これは何？
 
 MacやWindows、LinuxにコマンドをコピペするだけでAIがコードを書いてくれる環境。
-ネットワーク不要・完全無料。**Python + Ollama だけで動く**完全OSSのコーディングエージェント。
+ネットワーク不要・完全無料。**Python + OpenAI互換API（既定はOllama）で動く**完全OSSのコーディングエージェント。
 
 **エージェントのコア `vibe-coder.py` は Python 標準ライブラリだけで書かれた単一ファイルです。** pip install 不要、外部パッケージ依存ゼロ。ソースコードはそのまま読めるため、AIコーディングエージェントの仕組みを学ぶ教材としても、研究のベースラインとしても使えます。すべてがオープンソース (MIT) で公開されています。
 
 ```
-vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200行) → Ollama (直接通信)
+vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200行) → OpenAI互換API（Ollama既定・直接通信）
 ```
 
 ログイン不要・Node.js不要・プロキシプロセス不要。15個の内蔵ツール、サブエージェント、画像・PDF読み取り対応。577テスト。
@@ -217,12 +217,12 @@ AIは かんぺきでは ありません。まちがった コマンドを う�
 ### What is this?
 
 A free AI coding environment you can set up with a single command on your Mac, Windows, or Linux.
-No network required. Completely free. **Python + Ollama only** — a fully open-source coding agent.
+No network required. Completely free. **Python + an OpenAI-compatible API (Ollama by default)** — a fully open-source coding agent.
 
 **The core agent `vibe-coder.py` is a single file written entirely with the Python standard library.** No pip install needed. Zero external dependencies. The source code is human-readable as-is, making it ideal as teaching material for understanding how AI coding agents work, or as a research baseline. Everything is open source (MIT).
 
 ```
-vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200 lines) → Ollama (direct)
+vibe-local → vibe-coder.py (OSS, Python stdlib only, ~5200 lines) → OpenAI-compatible API (Ollama by default, direct)
 ```
 
 No login. No Node.js. No proxy process. 15 built-in tools, sub-agents, image/PDF reading. 577 tests.
@@ -284,16 +284,26 @@ vibe-local --model qwen3:8b
 <details>
 <summary>Common issues and solutions</summary>
 
-**"ollama failed to start"**
+**"ollama failed to start"** (only relevant when using Ollama)
 ```bash
 open -a Ollama        # macOS
 ollama serve          # Linux / Windows
+```
+
+**"cannot connect to the configured API endpoint"**
+```bash
+# Check OLLAMA_HOST / API_KEY
+# Both of these forms are supported:
+OLLAMA_HOST=https://api.example.com
+OLLAMA_HOST=https://api.example.com/v1
 ```
 
 **"model not found"**
 ```bash
 ollama pull qwen3:8b
 ```
+
+For non-Ollama backends, set `MODEL` to one of the IDs returned by `/v1/models`.
 
 **"vibe-coder.py not found"**
 ```bash
@@ -322,12 +332,12 @@ VIBE_LOCAL_DEBUG=1 vibe-local
 ### 这是什么？
 
 在Mac、Windows 或 Linux上只需复制粘贴一个命令，AI就能帮你写代码。
-无需网络，完全免费。**Python + Ollama** 打造的完全开源编程代理。
+无需网络，完全免费。**Python + OpenAI兼容API（默认是Ollama）** 打造的完全开源编程代理。
 
 **核心代理 `vibe-coder.py` 是仅使用 Python 标准库编写的单一文件。** 无需 pip install，零外部依赖。源代码直接可读，非常适合作为学习AI编程代理工作原理的教材或研究基线。一切以开源 (MIT) 形式公开。
 
 ```
-vibe-local → vibe-coder.py (开源, 纯Python标准库, ~5200行) → Ollama (直接通信)
+vibe-local → vibe-coder.py (开源, 纯Python标准库, ~5200行) → OpenAI兼容API（默认Ollama，直接通信）
 ```
 
 无需登录、无需Node.js、无需代理进程。15个内置工具、子代理、图像/PDF读取支持。577项测试。
@@ -515,13 +525,13 @@ There are many excellent open-source projects in the AI coding agent space. Each
 | `--prompt` | `-p` | One-shot prompt (non-interactive, enables quiet mode) | ワンショット（自動でquietモード） | 单次提示（自动启用安静模式） |
 | `--quiet` | `-q` | Output only the AI response (for scripting) | AIの回答のみ出力（スクリプト向け） | 仅输出AI响应（适合脚本） |
 | `--verbose` | | Show tool execution logs in quiet/headless mode | quietモードでもツールログを表示 | 安静模式下显示工具日志 |
-| `--model` | `-m` | Specify Ollama model name | Ollamaモデル名を指定 | 指定Ollama模型 |
+| `--model` | `-m` | Specify model name | モデル名を指定 | 指定模型名称 |
 | `--yes` | `-y` | Auto-approve all tool calls | 全ツール自動許可 | 自动批准所有工具 |
 | `--debug` | | Enable debug logging | デバッグログ有効化 | 启用调试日志 |
 | `--resume` | | Resume last session | 最後のセッション再開 | 恢复上一个会话 |
 | `--session-id <id>` | | Resume specific session | 指定セッション再開 | 恢复特定会话 |
 | `--list-sessions` | | List saved sessions | セッション一覧 | 列出会话 |
-| `--ollama-host <url>` | | Ollama API endpoint | Ollamaエンドポイント | Ollama API端点 |
+| `--ollama-host <url>` | | API endpoint (Ollama or OpenAI-compatible) | APIエンドポイント | API端点（Ollama / OpenAI兼容） |
 | `--max-tokens <n>` | | Max output tokens (default: 8192) | 最大出力トークン数 | 最大输出令牌数 |
 | `--temperature <f>` | | Sampling temperature (default: 0.7) | サンプリング温度 | 采样温度 |
 | `--context-window <n>` | | Context window size (default: 32768) | コンテキストウィンドウ | 上下文窗口 |
@@ -583,6 +593,9 @@ SIDECAR_MODEL="qwen3:1.7b"
 OLLAMA_HOST="http://localhost:11434"
 # API_KEY=""      # API key for non-Ollama backends (OpenAI, Groq, etc.)
 ```
+
+`OLLAMA_HOST` can be either a server base URL such as `https://api.example.com`
+or an API base that already includes `/v1`, such as `https://api.example.com/v1`.
 
 ### .env File (Project-level Config)
 
@@ -678,7 +691,7 @@ vibe-local offers normal mode (confirms each action) and auto-approve mode (`-y`
 | Mechanism | Description |
 |-----------|-------------|
 | **SAFE_TOOLS vs ASK_TOOLS** | Read/Glob/Grep/SubAgent/TaskTools are auto-approved. Bash/Write/Edit require confirmation. WebFetch/WebSearch need extra context. |
-| **SSRF prevention** | OLLAMA_HOST restricted to localhost only |
+| **Endpoint hardening** | OLLAMA_HOST must use http/https, strips credentials from URLs |
 | **URL scheme validation** | Only http:// and https:// allowed |
 | **Session ID sanitization** | Path traversal prevention |
 | **Max iteration limit** | Agent loop stops after 50 iterations |
