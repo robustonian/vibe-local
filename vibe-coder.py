@@ -45,6 +45,11 @@ try:
 except ImportError:
     HAS_READLINE = False
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 # Thread-safe stdout lock
 _print_lock = threading.Lock()
 from pathlib import Path
@@ -257,17 +262,22 @@ class Config:
 
         # Paths (primary: vibe-local, with backward compat for old vibe-coder dirs)
         if os.name == "nt":
+            userprofile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
             appdata = os.environ.get("LOCALAPPDATA",
-                                     os.path.join(os.path.expanduser("~"), "AppData", "Local"))
-            self.config_dir = os.path.join(appdata, "vibe-local")
+                                     os.path.join(userprofile, "AppData", "Local"))
+            self.config_dir = os.path.join(userprofile, ".config", "vibe-local")
             self.state_dir = os.path.join(appdata, "vibe-local")
-            self._old_config_dir = os.path.join(appdata, "vibe-coder")
+            self._old_config_dir = os.path.join(userprofile, ".config", "vibe-coder")
             self._old_state_dir = os.path.join(appdata, "vibe-coder")
+            self._legacy_config_dir = os.path.join(appdata, "vibe-local")
+            self._legacy_old_config_dir = os.path.join(appdata, "vibe-coder")
         else:
             self.config_dir = os.path.join(os.path.expanduser("~"), ".config", "vibe-local")
             self.state_dir = os.path.join(os.path.expanduser("~"), ".local", "state", "vibe-local")
             self._old_config_dir = os.path.join(os.path.expanduser("~"), ".config", "vibe-coder")
             self._old_state_dir = os.path.join(os.path.expanduser("~"), ".local", "state", "vibe-coder")
+            self._legacy_config_dir = None
+            self._legacy_old_config_dir = None
 
         self.config_file = os.path.join(self.config_dir, "config")
         self.permissions_file = os.path.join(self.config_dir, "permissions.json")
@@ -286,9 +296,22 @@ class Config:
         return self
 
     def _load_config_file(self):
-        # Check old vibe-coder config for backward compatibility, then current config
-        old_config = os.path.join(self._old_config_dir, "config")
-        for cfg_path in [old_config, self.config_file]:
+        # Load legacy config locations first, then the current config so the
+        # documented ~/.config/vibe-local/config path wins on Windows too.
+        candidate_dirs = [
+            self._legacy_old_config_dir,
+            self._old_config_dir,
+            self._legacy_config_dir,
+            self.config_dir,
+        ]
+        seen = set()
+        for cfg_dir in candidate_dirs:
+            if not cfg_dir:
+                continue
+            cfg_path = os.path.join(cfg_dir, "config")
+            if cfg_path in seen:
+                continue
+            seen.add(cfg_path)
             if not os.path.isfile(cfg_path):
                 continue
             # Security: skip symlinks (attacker could link to /etc/shadow)
@@ -1838,8 +1861,15 @@ def _is_protected_path(file_path):
         if basename in _PROTECTED_BASENAMES:
             return True
         # Check both vibe-local and legacy vibe-coder config directories
+        user_home = os.environ.get("USERPROFILE", os.path.expanduser("~")) if os.name == "nt" else os.path.expanduser("~")
+        config_dirs = []
         for dirname in ("vibe-local", "vibe-coder"):
-            config_dir = os.path.join(os.path.expanduser("~"), ".config", dirname)
+            config_dirs.append(os.path.join(user_home, ".config", dirname))
+        if os.name == "nt":
+            appdata = os.environ.get("LOCALAPPDATA", os.path.join(user_home, "AppData", "Local"))
+            for dirname in ("vibe-local", "vibe-coder"):
+                config_dirs.append(os.path.join(appdata, dirname))
+        for config_dir in config_dirs:
             real_config_dir = os.path.realpath(config_dir)
             if real.startswith(real_config_dir + os.sep) or real == real_config_dir:
                 return True
@@ -4147,6 +4177,7 @@ class TUI:
         self._spinner_thread = None
         self.is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
         self._is_cjk = self._detect_cjk_locale()
+        self._windows_pushback = collections.deque()
         try:
             self._term_cols = shutil.get_terminal_size((80, 24)).columns
         except (ValueError, OSError):
@@ -4275,9 +4306,15 @@ class TUI:
         _hint = _ansi("\033[38;5;250m")  # lighter gray for better visibility
         if self._is_cjk:
             print(f"  {_hint}/help コマンド一覧 • Ctrl+C 中断 (2回で終了) • \"\"\"で複数行{C.RESET}")
-            print(f"  {_hint}IME対応: 空行Enterで送信{C.RESET}\n")
+            if os.name == "nt":
+                print(f"  {_hint}IME対応: 空行Enterで送信 • Ctrl+Jで改行{C.RESET}\n")
+            else:
+                print(f"  {_hint}IME対応: 空行Enterで送信{C.RESET}\n")
         else:
-            print(f"  {_hint}/help commands • Ctrl+C to interrupt (press twice to quit) • \"\"\" for multiline{C.RESET}\n")
+            if os.name == "nt":
+                print(f"  {_hint}/help commands • Ctrl+C to interrupt (press twice to quit) • Ctrl+J or \"\"\" for multiline{C.RESET}\n")
+            else:
+                print(f"  {_hint}/help commands • Ctrl+C to interrupt (press twice to quit) • \"\"\" for multiline{C.RESET}\n")
 
     def _detect_cjk_locale(self):
         """Detect if user is likely using CJK input (IME)."""
@@ -4292,29 +4329,155 @@ class TUI:
                 lang = os.environ.get("LANG", "")
         except Exception:
             lang = os.environ.get("LANG", "")
-        cjk_prefixes = ("ja", "zh", "ko", "ja_JP", "zh_CN", "zh_TW", "ko_KR")
-        return any(lang.startswith(p) for p in cjk_prefixes)
+        lang = (lang or "").strip()
+        normalized = lang.lower().replace("-", "_")
+        if normalized.startswith(("ja", "zh", "ko")):
+            return True
+        tokens = [t for t in re.split(r"[^a-z]+", normalized) if t]
+        cjk_tokens = {
+            "ja", "jp", "japanese", "japan",
+            "zh", "cn", "tw", "hk", "chinese", "china", "taiwan", "hongkong",
+            "ko", "kr", "korean", "korea",
+        }
+        return any(token in cjk_tokens for token in tokens)
+
+    def _build_prompt(self, session=None, plan_mode=False):
+        """Build the interactive prompt string."""
+        _rl_reset = _rl_ansi(C.RESET if C._enabled else "")
+        plan_tag = f"{_rl_ansi(chr(27)+'[38;5;226m')}[PLAN]{_rl_reset} " if plan_mode else ""
+        if session:
+            pct = min(int((session.get_token_estimate() / session.config.context_window) * 100), 100)
+            if pct < 50:
+                ctx_color = _rl_ansi("\033[38;5;240m")
+            elif pct < 80:
+                ctx_color = _rl_ansi("\033[38;5;226m")
+            else:
+                ctx_color = _rl_ansi("\033[38;5;196m")
+            return f"{plan_tag}{ctx_color}ctx:{pct}%{_rl_reset} {_rl_ansi(chr(27)+'[38;5;51m')}❯{_rl_reset} "
+        return f"{plan_tag}{_rl_ansi(chr(27)+'[38;5;51m')}❯{_rl_reset} "
+
+    def _windows_read_char(self):
+        """Read a single Windows console character, honoring pushback."""
+        if self._windows_pushback:
+            return self._windows_pushback.popleft()
+        if msvcrt is None:
+            raise RuntimeError("Windows console input is unavailable")
+        return msvcrt.getwch()
+
+    def _windows_unread_char(self, ch):
+        """Push a character back onto the Windows console input stream."""
+        if ch:
+            self._windows_pushback.appendleft(ch)
+
+    def _windows_has_buffered_input(self):
+        """Return True when more Windows console input is buffered."""
+        return bool(msvcrt and msvcrt.kbhit())
+
+    def _windows_read_console_line(self, prompt_str):
+        """Read one logical line from the Windows console.
+
+        Returns ``(text, reason)`` where reason is one of:
+        - ``enter``: user pressed Enter with no extra buffered input
+        - ``paste_newline``: a pasted CRLF ended this line and more input follows
+        - ``ctrl_j``: Ctrl+J inserted a newline/continuation
+        """
+        sys.stdout.write(prompt_str)
+        sys.stdout.flush()
+        chars = []
+        while True:
+            ch = self._windows_read_char()
+            if ch in ("\x00", "\xe0"):
+                try:
+                    self._windows_read_char()  # consume special-key suffix
+                except RuntimeError:
+                    pass
+                continue
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch == "\x1a":
+                raise EOFError
+            if ch in ("\b", "\x08"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            if ch == "\r":
+                reason = "enter"
+                if self._windows_has_buffered_input():
+                    next_ch = self._windows_read_char()
+                    if next_ch == "\n":
+                        if self._windows_has_buffered_input():
+                            reason = "paste_newline"
+                    else:
+                        self._windows_unread_char(next_ch)
+                        reason = "paste_newline"
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(chars), reason
+            if ch == "\n":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(chars), "ctrl_j"
+            chars.append(ch)
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+
+    def _get_windows_multiline_input(self, session=None, plan_mode=False):
+        """Windows console input path that preserves multiline paste and Ctrl+J."""
+        prompt_str = self._build_prompt(session=session, plan_mode=plan_mode)
+        try:
+            first_line, reason = self._windows_read_console_line(prompt_str)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+        if first_line.strip() == '"""':
+            lines = []
+            print(f"{C.DIM}  (multi-line input, end with \"\"\" on its own line){C.RESET}")
+            while True:
+                try:
+                    line, _reason = self._windows_read_console_line(f"{C.DIM}...{C.RESET} ")
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\n{C.DIM}(Cancelled){C.RESET}")
+                    return None
+                if line.strip() == '"""':
+                    break
+                lines.append(line)
+            return "\n".join(lines)
+
+        needs_continuation = (
+            reason in ("ctrl_j", "paste_newline")
+            or (self._is_cjk and first_line.strip() and not first_line.strip().startswith("/"))
+        )
+        if not needs_continuation:
+            return first_line
+
+        if not hasattr(self, '_windows_multiline_hint_shown'):
+            self._windows_multiline_hint_shown = True
+            if self._is_cjk:
+                print(f"{C.DIM}  (IME mode: press Enter on empty line to send, Ctrl+J for newline, \"\"\" for multiline){C.RESET}")
+            else:
+                print(f"{C.DIM}  (multi-line mode: paste or Ctrl+J adds lines, press Enter on an empty line to send){C.RESET}")
+
+        lines = [first_line]
+        while True:
+            try:
+                cont, cont_reason = self._windows_read_console_line(f"{C.DIM}...{C.RESET} ")
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n{C.DIM}(Cancelled){C.RESET}")
+                return None
+            if cont == "" and cont_reason == "enter":
+                break
+            lines.append(cont)
+        return "\n".join(lines)
 
     def get_input(self, session=None, plan_mode=False):
         """Get user input with readline support. Returns None on EOF/exit.
         IME-safe: in CJK locales, waits for a brief pause after Enter
         to avoid sending during kanji conversion."""
         try:
-            # Plan mode indicator — use _rl_ansi for readline-safe ANSI in prompts
-            _rl_reset = _rl_ansi(C.RESET if C._enabled else "")
-            plan_tag = f"{_rl_ansi(chr(27)+'[38;5;226m')}[PLAN]{_rl_reset} " if plan_mode else ""
-            # Show context usage indicator in prompt
-            if session:
-                pct = min(int((session.get_token_estimate() / session.config.context_window) * 100), 100)
-                if pct < 50:
-                    ctx_color = _rl_ansi("\033[38;5;240m")
-                elif pct < 80:
-                    ctx_color = _rl_ansi("\033[38;5;226m")
-                else:
-                    ctx_color = _rl_ansi("\033[38;5;196m")
-                prompt_str = f"{plan_tag}{ctx_color}ctx:{pct}%{_rl_reset} {_rl_ansi(chr(27)+'[38;5;51m')}❯{_rl_reset} "
-            else:
-                prompt_str = f"{plan_tag}{_rl_ansi(chr(27)+'[38;5;51m')}❯{_rl_reset} "
+            prompt_str = self._build_prompt(session=session, plan_mode=plan_mode)
             line = input(prompt_str)
             return line
         except (EOFError, KeyboardInterrupt):
@@ -4328,6 +4491,9 @@ class TUI:
         - Empty line (Enter on blank) to submit in CJK/IME mode
         - Single Enter to submit in non-CJK mode
         """
+        if os.name == "nt" and self.is_interactive:
+            return self._get_windows_multiline_input(session=session, plan_mode=plan_mode)
+
         first_line = self.get_input(session=session, plan_mode=plan_mode)
         if first_line is None:
             return None
@@ -4355,7 +4521,7 @@ class TUI:
             # Show subtle hint on first use
             if not hasattr(self, '_ime_hint_shown'):
                 self._ime_hint_shown = True
-                print(f"{C.DIM}  (IME mode: press Enter on empty line to send, \"\"\" for multiline){C.RESET}")
+                print(f"{C.DIM}  (IME mode: press Enter on empty line to send, Ctrl+J for newline, \"\"\" for multiline){C.RESET}")
             lines = [first_line]
             while True:
                 try:

@@ -165,6 +165,38 @@ class TestConfig:
         finally:
             os.unlink(f.name)
 
+    def test_windows_config_dir_uses_userprofile_dotconfig(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as appdata:
+            with mock.patch.object(vc.os, "name", "nt"):
+                with mock.patch.dict(vc.os.environ, {
+                    "USERPROFILE": home,
+                    "LOCALAPPDATA": appdata,
+                }, clear=False):
+                    cfg = vc.Config()
+            assert cfg.config_dir == os.path.join(home, ".config", "vibe-local")
+            assert cfg.state_dir == os.path.join(appdata, "vibe-local")
+
+    def test_windows_load_config_file_prefers_userprofile_config_for_context_window(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as appdata:
+            current_dir = os.path.join(home, ".config", "vibe-local")
+            legacy_dir = os.path.join(appdata, "vibe-local")
+            os.makedirs(current_dir, exist_ok=True)
+            os.makedirs(legacy_dir, exist_ok=True)
+            with open(os.path.join(legacy_dir, "config"), "w", encoding="utf-8") as f:
+                f.write("CONTEXT_WINDOW=8192\n")
+            with open(os.path.join(current_dir, "config"), "w", encoding="utf-8") as f:
+                f.write("CONTEXT_WINDOW=65536\n")
+
+            with mock.patch.object(vc.os, "name", "nt"):
+                with mock.patch.dict(vc.os.environ, {
+                    "USERPROFILE": home,
+                    "LOCALAPPDATA": appdata,
+                }, clear=False):
+                    cfg = vc.Config()
+                    cfg._load_config_file()
+
+            assert cfg.context_window == 65536
+
     def test_auto_detect_model_high_ram_fallback(self):
         """When Ollama is not reachable, falls back to RAM-based heuristic."""
         cfg = vc.Config()
@@ -2620,6 +2652,68 @@ class TestSlashCommands:
         assert "plan_mode" in sig.parameters
 
 
+class TestWindowsMultilineInput:
+    """Windows-specific multiline input regressions."""
+
+    def test_get_multiline_input_windows_paste_collects_all_lines(self):
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+        tui.is_interactive = True
+        tui._is_cjk = False
+        with mock.patch.object(vc.os, "name", "nt"):
+            with mock.patch.object(
+                tui,
+                "_windows_read_console_line",
+                side_effect=[
+                    ("alpha", "paste_newline"),
+                    ("beta", "paste_newline"),
+                    ("gamma", "enter"),
+                    ("", "enter"),
+                ],
+                create=True,
+            ):
+                with mock.patch("builtins.input", side_effect=AssertionError("should not use input() on Windows paste")):
+                    assert tui.get_multiline_input() == "alpha\nbeta\ngamma"
+
+    def test_get_multiline_input_windows_ctrl_j_starts_multiline(self):
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+        tui.is_interactive = True
+        tui._is_cjk = False
+        with mock.patch.object(vc.os, "name", "nt"):
+            with mock.patch.object(
+                tui,
+                "_windows_read_console_line",
+                side_effect=[
+                    ("first line", "ctrl_j"),
+                    ("second line", "enter"),
+                    ("", "enter"),
+                ],
+                create=True,
+            ):
+                with mock.patch("builtins.input", side_effect=AssertionError("should not use input() for Ctrl+J multiline")):
+                    assert tui.get_multiline_input() == "first line\nsecond line"
+
+    def test_get_multiline_input_windows_cjk_enter_waits_for_blank_line(self):
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+        tui.is_interactive = True
+        tui._is_cjk = True
+        with mock.patch.object(vc.os, "name", "nt"):
+            with mock.patch.object(
+                tui,
+                "_windows_read_console_line",
+                side_effect=[
+                    ("こんにちは", "enter"),
+                    ("続き", "enter"),
+                    ("", "enter"),
+                ],
+                create=True,
+            ):
+                with mock.patch("builtins.input", side_effect=AssertionError("should not use input() for Windows IME flow")):
+                    assert tui.get_multiline_input() == "こんにちは\n続き"
+
+
 class TestToolRegistryWithTaskTools:
     """ToolRegistry includes task management tools."""
 
@@ -4560,6 +4654,13 @@ class TestCjkLocaleCache:
             _ = tui._is_cjk
             # Still only called once
             mock_detect.assert_called_once()
+
+    def test_detect_cjk_locale_accepts_windows_locale_names(self):
+        """Windows locale strings like Japanese_Japan.932 should enable IME mode."""
+        cfg = vc.Config()
+        tui = vc.TUI(cfg)
+        with mock.patch("locale.getlocale", return_value=("Japanese_Japan.932", "cp932")):
+            assert tui._detect_cjk_locale() is True
 
 
 class TestCommitGitAddU:

@@ -561,7 +561,12 @@ There are many excellent open-source projects in the AI coding agent space. Each
 | `/yes` | Enable auto-approve | 自動許可ON | 启用自动批准 |
 | `exit`, `quit`, `bye` | Exit (no `/` needed) | 終了 | 退出 |
 | `"""` | Multi-line input | 複数行入力 | 多行输入 |
+| `Ctrl+J` | Insert newline in interactive input (Windows/Linux) | 対話入力で改行を追加（Windows/Linux） | 在交互输入中插入换行（Windows/Linux） |
 | `Ctrl+C` | Stop (double-tap to exit) | 停止（2回で終了） | 停止（连按退出） |
+
+Windows native console note: pasted multi-line text stays in multi-line mode, and an empty line sends the message.
+Windows ネイティブコンソール補足: 複数行を貼り付けても途中送信されず、空行で送信されます。
+Windows 原生控制台补充：粘贴多行文本时不会中途发送，输入空行后才会发送。
 
 ---
 
@@ -572,6 +577,14 @@ There are many excellent open-source projects in the AI coding agent space. Each
 ```bash
 ~/.config/vibe-local/config
 ```
+
+On Windows native PowerShell, this is:
+
+```powershell
+$env:USERPROFILE\.config\vibe-local\config
+```
+
+Windows also reads the legacy fallback `%LOCALAPPDATA%\vibe-local\config`, but `~/.config/vibe-local/config` wins when both exist.
 
 Format: `KEY="value"`. Lines starting with `#` are comments.
 
