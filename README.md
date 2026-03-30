@@ -80,6 +80,20 @@ vibe-local -y -p "lsコマンドを使って" --verbose
 vibe-local --model qwen3:8b
 ```
 
+### セッション telemetry
+
+`vibe-local` は保存済みセッション (`~/.local/state/vibe-local/sessions/*.jsonl`) に、
+通常の chat message 行に加えて非メッセージの telemetry record も保存できるようになりました。
+これらの行は `record_type` で識別され、通常の session resume では無視されるため後方互換です。
+
+この telemetry により、`otel-agent-trace` や `ts-bench` から以下を正規化して分析できます。
+
+- tool call 回数
+- tool ごとの実行時間
+- error rate
+- token usage
+- turn / session duration
+
 ### 対応環境
 
 | 環境 | メモリ | メインモデル | サイドカー | 備考 |

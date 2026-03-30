@@ -34,7 +34,7 @@ import hashlib
 import traceback
 import base64
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 import collections
 import concurrent.futures
 
@@ -1312,6 +1312,201 @@ class ToolResult:
         self.id = tool_call_id
         self.output = output
         self.is_error = is_error
+
+
+def _utcnow_iso():
+    """Return a timezone-aware UTC timestamp in ISO 8601 format."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _classify_tool_for_telemetry(name):
+    """Group tools into coarse categories compatible with dashboard analytics."""
+    categories = {
+        "file_read": {"Read", "Glob", "Grep"},
+        "file_write": {"Write", "Edit"},
+        "shell": {"Bash"},
+        "web": {"WebSearch", "WebFetch"},
+        "agent": {"SubAgent", "TaskCreate", "TaskList", "TaskGet", "TaskUpdate"},
+        "system": {"NotebookEdit", "ToolSearch", "ExitPlanMode"},
+    }
+    for category, tools in categories.items():
+        if name in tools:
+            return category
+    return "other"
+
+
+def _get_git_branch(path):
+    """Best-effort lookup of the current git branch for a working tree."""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    branch = (result.stdout or "").strip()
+    return branch or None
+
+
+class SessionTelemetry:
+    """Persistable session telemetry state for downstream analysis."""
+
+    RECORD_TYPE = "vibe_local_telemetry"
+    SCHEMA_VERSION = 1
+
+    def __init__(self, config, session_id, state=None):
+        self.config = config
+        self.session_id = session_id
+        self.session_source = "vibe-local"
+        now = _utcnow_iso()
+        self.created_at = now
+        self.updated_at = now
+        self.cwd = os.path.abspath(getattr(config, "cwd", os.getcwd()))
+        self.session_metadata = {
+            "assistantModels": [],
+            "versions": [],
+            "gitBranches": [],
+            "entrypoints": ["cli"],
+            "agentNames": ["vibe-local"],
+        }
+        self.turns = []
+        self._current_turn = None
+
+        self._add_metadata("assistantModels", getattr(config, "model", None))
+        self._add_metadata("versions", __version__)
+        self._add_metadata("gitBranches", _get_git_branch(self.cwd))
+
+        if state:
+            self._load_state(state)
+
+    def _add_metadata(self, key, value):
+        if value and value not in self.session_metadata[key]:
+            self.session_metadata[key].append(value)
+            self.session_metadata[key].sort()
+
+    def _load_state(self, state):
+        self.created_at = state.get("createdAt") or self.created_at
+        self.updated_at = state.get("updatedAt") or self.updated_at
+        self.cwd = state.get("cwd") or self.cwd
+        metadata = state.get("sessionMetadata") or {}
+        self.session_metadata = {
+            "assistantModels": sorted(set(metadata.get("assistantModels") or self.session_metadata["assistantModels"])),
+            "versions": sorted(set(metadata.get("versions") or self.session_metadata["versions"])),
+            "gitBranches": sorted(set(metadata.get("gitBranches") or self.session_metadata["gitBranches"])),
+            "entrypoints": sorted(set(metadata.get("entrypoints") or self.session_metadata["entrypoints"])),
+            "agentNames": sorted(set(metadata.get("agentNames") or self.session_metadata["agentNames"])),
+        }
+        turns = []
+        for turn in state.get("turns") or []:
+            start = turn.get("start")
+            end = turn.get("end") or start
+            if not start or not end:
+                continue
+            turns.append({
+                "turnIndex": int(turn.get("turnIndex") or len(turns) + 1),
+                "start": start,
+                "end": end,
+                "inputTokens": int(turn.get("inputTokens") or 0),
+                "outputTokens": int(turn.get("outputTokens") or 0),
+                "cacheReadTokens": int(turn.get("cacheReadTokens") or 0),
+                "tools": [
+                    {
+                        "id": tool.get("id", ""),
+                        "name": tool.get("name", "unknown"),
+                        "category": tool.get("category") or _classify_tool_for_telemetry(tool.get("name", "unknown")),
+                        "start": tool.get("start") or start,
+                        "end": tool.get("end") or tool.get("start") or start,
+                        "error": bool(tool.get("error")),
+                    }
+                    for tool in turn.get("tools") or []
+                ],
+            })
+        self.turns = turns
+        self._current_turn = None
+
+    def start_turn(self):
+        if self._current_turn is not None:
+            self.finish_turn()
+        now = _utcnow_iso()
+        turn = {
+            "turnIndex": len(self.turns) + 1,
+            "start": now,
+            "end": now,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "tools": [],
+        }
+        self.turns.append(turn)
+        self._current_turn = turn
+        self.updated_at = now
+
+    def record_model_response(self, model, usage=None):
+        self._add_metadata("assistantModels", model)
+        self._add_metadata("versions", __version__)
+        self._add_metadata("gitBranches", _get_git_branch(self.cwd))
+        if self._current_turn is None:
+            return
+
+        usage = usage or {}
+        self._current_turn["inputTokens"] += int(usage.get("prompt_tokens") or 0)
+        self._current_turn["outputTokens"] += int(usage.get("completion_tokens") or 0)
+        self._current_turn["cacheReadTokens"] += int(
+            usage.get("cache_read_tokens")
+            or usage.get("cache_read_input_tokens")
+            or 0
+        )
+        self.updated_at = _utcnow_iso()
+
+    def record_tool_call(self, tool_call_id, tool_name, started_at=None, ended_at=None, is_error=False):
+        if self._current_turn is None:
+            self.start_turn()
+        start = started_at or _utcnow_iso()
+        end = ended_at or start
+        self._current_turn["tools"].append({
+            "id": tool_call_id,
+            "name": tool_name or "unknown",
+            "category": _classify_tool_for_telemetry(tool_name or "unknown"),
+            "start": start,
+            "end": end,
+            "error": bool(is_error),
+        })
+        self.updated_at = end
+
+    def finish_turn(self):
+        if self._current_turn is None:
+            return
+        self._current_turn["end"] = _utcnow_iso()
+        self.updated_at = self._current_turn["end"]
+        self._current_turn = None
+
+    def to_record(self, message_count):
+        return {
+            "record_type": self.RECORD_TYPE,
+            "schema_version": self.SCHEMA_VERSION,
+            "state": {
+                "sessionId": self.session_id,
+                "sessionSource": self.session_source,
+                "cwd": self.cwd,
+                "createdAt": self.created_at,
+                "updatedAt": self.updated_at,
+                "messageCount": message_count,
+                "sessionMetadata": {
+                    "assistantModels": sorted(set(self.session_metadata["assistantModels"])),
+                    "versions": sorted(set(self.session_metadata["versions"])),
+                    "gitBranches": sorted(set(self.session_metadata["gitBranches"])),
+                    "entrypoints": sorted(set(self.session_metadata["entrypoints"])),
+                    "agentNames": sorted(set(self.session_metadata["agentNames"])),
+                },
+                "turns": self.turns,
+            },
+        }
 
 
 class Tool(ABC):
@@ -3702,6 +3897,7 @@ class Session:
         self._token_estimate = 0
         self._last_compact_msg_count = 0  # prevent infinite re-compaction
         self._just_compacted = False  # skip token reconciliation right after compaction
+        self.telemetry = SessionTelemetry(config, self.session_id)
 
     def set_client(self, client):
         """Set OllamaClient reference for sidecar model summarization."""
@@ -4053,6 +4249,7 @@ class Session:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     for msg in self.messages:
                         f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(self.telemetry.to_record(len(self.messages)), ensure_ascii=False) + "\n")
                 os.chmod(tmp_path, 0o600)  # restrict permissions before exposing
                 os.replace(tmp_path, path)  # atomic rename
             except Exception:
@@ -4104,6 +4301,7 @@ class Session:
         try:
             self.messages = []
             skipped = 0
+            telemetry_state = None
             with open(path, encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
@@ -4114,6 +4312,8 @@ class Session:
                         # Basic schema validation
                         if isinstance(msg, dict) and "role" in msg:
                             self.messages.append(msg)
+                        elif isinstance(msg, dict) and msg.get("record_type") == SessionTelemetry.RECORD_TYPE:
+                            telemetry_state = msg.get("state") or {}
                         else:
                             skipped += 1
                     except json.JSONDecodeError:
@@ -4127,6 +4327,7 @@ class Session:
                 print(f"{C.YELLOW}Warning: Skipped {skipped} corrupt line(s) in session.{C.RESET}",
                       file=sys.stderr)
             self.session_id = sid
+            self.telemetry = SessionTelemetry(self.config, sid, telemetry_state)
             self._recalculate_tokens()
             return True
         except OSError as e:
@@ -5005,6 +5206,7 @@ class Agent:
 
     def run(self, user_input):
         """Run the agent loop for a single user request."""
+        self.session.telemetry.start_turn()
         self.session.add_user_message(user_input)
         self._interrupted.clear()
         _recent_tool_calls = []  # track recent calls for loop detection
@@ -5075,10 +5277,12 @@ class Agent:
                         if hasattr(response, 'close'):
                             response.close()
 
+                usage = response.get("usage", {}) if isinstance(response, dict) else {}
+                self.session.telemetry.record_model_response(self.config.model, usage)
+
                 # Reconcile token estimate with actual usage from API
                 # Skip reconciliation right after compaction to avoid drift
                 if isinstance(response, dict) and not self.session._just_compacted:
-                    usage = response.get("usage", {})
                     if usage.get("prompt_tokens", 0) > 0:
                         self.session._token_estimate = (
                             usage["prompt_tokens"] + usage.get("completion_tokens", 0)
@@ -5110,6 +5314,18 @@ class Agent:
                 # 4. If no tool calls, we're done
                 if not tool_calls:
                     break
+
+                recorded_tool_ids = set()
+
+                def record_tool_telemetry(tc_id, tool_name, started_at=None, ended_at=None, is_error=False):
+                    self.session.telemetry.record_tool_call(
+                        tc_id,
+                        tool_name,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        is_error=is_error,
+                    )
+                    recorded_tool_ids.add(tc_id)
 
                 # 5. Detect infinite tool call loops
                 def _norm_args(raw):
@@ -5160,6 +5376,7 @@ class Agent:
                             except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                                 # Unsalvageable — report error to LLM instead of passing bad params
                                 results.append(ToolResult(tc_id, f"Error: tool arguments are not valid JSON: {raw_args[:200]}", True))
+                                record_tool_telemetry(tc_id, tool_name, is_error=True)
                                 continue
                     parsed_calls.append((tc_id, tool_name, tool_params))
 
@@ -5169,6 +5386,7 @@ class Agent:
                     tool = self.registry.get(tool_name)
                     if not tool:
                         results.append(ToolResult(tc_id, f"Error: unknown tool '{tool_name}'", True))
+                        record_tool_telemetry(tc_id, tool_name, is_error=True)
                         continue
                     # Canonicalize tool_name to registered name (defense-in-depth
                     # against case variations like "bash" vs "Bash")
@@ -5179,6 +5397,7 @@ class Agent:
                     if not self.permissions.check(tool_name, tool_params, self.tui):
                         results.append(ToolResult(tc_id, "Permission denied by user. Do not retry this operation.", True))
                         self.tui.show_tool_result(tool_name, "Permission denied", True)
+                        record_tool_telemetry(tc_id, tool_name, is_error=True)
                         continue
                     validated_calls.append((tc_id, tool_name, tool_params, tool))
 
@@ -5191,12 +5410,23 @@ class Agent:
                 if all_parallel_safe:
                     def _exec_one(item):
                         tc_id, tool_name, tool_params, tool = item
+                        started_at = _utcnow_iso()
                         try:
                             output = tool.execute(tool_params)
-                            return ToolResult(tc_id, output)
+                            return ToolResult(tc_id, output), {
+                                "tool_name": tool_name,
+                                "started_at": started_at,
+                                "ended_at": _utcnow_iso(),
+                                "is_error": False,
+                            }
                         except Exception as e:
                             error_msg = f"Tool error: {e}"
-                            return ToolResult(tc_id, error_msg, True)
+                            return ToolResult(tc_id, error_msg, True), {
+                                "tool_name": tool_name,
+                                "started_at": started_at,
+                                "ended_at": _utcnow_iso(),
+                                "is_error": True,
+                            }
 
                     # Execute all in parallel, buffer results, display in original order
                     futures_map = {}
@@ -5220,36 +5450,57 @@ class Agent:
                             break
                         future, _ = futures_map[tc_id]
                         try:
-                            result = future.result()
+                            result, telemetry = future.result()
                         except (concurrent.futures.CancelledError, Exception) as e:
                             result = ToolResult(tc_id, f"Tool error: {e}", True)
+                            now_iso = _utcnow_iso()
+                            telemetry = {
+                                "tool_name": tool_name,
+                                "started_at": now_iso,
+                                "ended_at": now_iso,
+                                "is_error": True,
+                            }
                         self.tui.show_tool_result(tool_name, result.output, result.is_error)
                         results.append(result)
+                        record_tool_telemetry(
+                            tc_id,
+                            telemetry["tool_name"],
+                            telemetry["started_at"],
+                            telemetry["ended_at"],
+                            telemetry["is_error"],
+                        )
                 else:
                     # Sequential execution (preserves ordering for side-effecting tools)
                     for tc_id, tool_name, tool_params, tool in validated_calls:
                         if self._interrupted.is_set():
                             break
+                        started_at = _utcnow_iso()
                         try:
                             is_long_op = tool_name in ("Bash", "WebFetch", "WebSearch")
                             if is_long_op:
                                 self.tui.start_spinner(f"Running {tool_name}")
                             output = tool.execute(tool_params)
+                            ended_at = _utcnow_iso()
                             if is_long_op:
                                 self.tui.stop_spinner()
                             self.tui.show_tool_result(tool_name, output)
                             results.append(ToolResult(tc_id, output))
+                            record_tool_telemetry(tc_id, tool_name, started_at, ended_at, False)
                         except KeyboardInterrupt:
+                            ended_at = _utcnow_iso()
                             self.tui.stop_spinner()
                             results.append(ToolResult(tc_id, "Interrupted by user", True))
                             self.tui.show_tool_result(tool_name, "Interrupted", True)
+                            record_tool_telemetry(tc_id, tool_name, started_at, ended_at, True)
                             self._interrupted.set()
                             break
                         except Exception as e:
+                            ended_at = _utcnow_iso()
                             self.tui.stop_spinner()
                             error_msg = f"Tool error: {e}"
                             self.tui.show_tool_result(tool_name, error_msg, True)
                             results.append(ToolResult(tc_id, error_msg, True))
+                            record_tool_telemetry(tc_id, tool_name, started_at, ended_at, True)
 
                 # 6. Add tool results to history
                 # If interrupted mid-tool-loop, pad missing results so the
@@ -5260,6 +5511,15 @@ class Agent:
                         tid = tc.get("id", "")
                         if tid and tid not in called_ids:
                             results.append(ToolResult(tid, "Cancelled by user", True))
+                        if tid and tid not in recorded_tool_ids:
+                            now_iso = _utcnow_iso()
+                            record_tool_telemetry(
+                                tid,
+                                tc.get("function", {}).get("name", ""),
+                                now_iso,
+                                now_iso,
+                                True,
+                            )
                 self.session.add_tool_results(results)
 
                 # Skip compaction if interrupted — just save partial results and break
@@ -5342,6 +5602,7 @@ class Agent:
             print(f"\n{C.YELLOW}The AI took {self.MAX_ITERATIONS} steps without finishing.{C.RESET}")
             print(f"{C.DIM}Your work so far is saved. Try breaking the task into smaller steps,{C.RESET}")
             print(f"{C.DIM}or type /compact to free up context and continue.{C.RESET}")
+        self.session.telemetry.finish_turn()
 
     def interrupt(self):
         self._interrupted.set()
