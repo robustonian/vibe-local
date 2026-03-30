@@ -42,6 +42,54 @@ def _validate_ollama_host(url):
         return "http://localhost:11434"
     return url
 
+
+def _usage_int(usage, *path):
+    """Read a nested integer from a usage payload, returning None when absent."""
+    current = usage
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    if current is None:
+        return None
+    try:
+        return max(int(current), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_usage_for_anthropic(usage):
+    """Translate cache-aware OpenAI-compatible usage into Anthropic-style usage fields."""
+    if not isinstance(usage, dict):
+        usage = {}
+
+    cache_read = _usage_int(usage, "cache_read_input_tokens")
+    if cache_read is None:
+        cache_read = _usage_int(usage, "cache_read_tokens")
+    if cache_read is None:
+        cache_read = _usage_int(usage, "prompt_tokens_details", "cached_tokens")
+    if cache_read is None:
+        cache_read = _usage_int(usage, "input_tokens_details", "cached_tokens")
+    cache_read = cache_read or 0
+
+    prompt_tokens = _usage_int(usage, "prompt_tokens")
+    input_tokens = _usage_int(usage, "input_tokens")
+    if input_tokens is None:
+        input_tokens = max((prompt_tokens or 0) - cache_read, 0)
+
+    completion_tokens = _usage_int(usage, "completion_tokens")
+    output_tokens = _usage_int(usage, "output_tokens")
+    if output_tokens is None:
+        output_tokens = completion_tokens or 0
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cache_read,
+    }
+
+
 OLLAMA_BASE = _validate_ollama_host(OLLAMA_BASE)
 
 # --- Model routing ---
@@ -1134,16 +1182,14 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
 
         stop_reason = "tool_use" if finish_reason == "tool_calls" else ("end_turn" if finish_reason == "stop" else finish_reason)
 
+        anthropic_usage = _normalize_usage_for_anthropic(oai_resp.get("usage", {}))
+
         anthropic_resp = {
             "id": f"msg_{uuid.uuid4().hex[:24]}",
             "type": "message", "role": "assistant",
             "content": content_blocks, "model": model,
             "stop_reason": stop_reason, "stop_sequence": None,
-            "usage": {
-                "input_tokens": oai_resp.get("usage", {}).get("prompt_tokens", 0),
-                "output_tokens": oai_resp.get("usage", {}).get("completion_tokens", 0),
-                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-            },
+            "usage": anthropic_usage,
         }
 
         # Debug: log full Anthropic response
@@ -1175,8 +1221,8 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         stop_reason = "tool_use" if finish_reason == "tool_calls" else ("end_turn" if finish_reason == "stop" else finish_reason)
-        input_tokens = oai_resp.get("usage", {}).get("prompt_tokens", 0)
-        output_tokens = oai_resp.get("usage", {}).get("completion_tokens", 0)
+        anthropic_usage = _normalize_usage_for_anthropic(oai_resp.get("usage", {}))
+        output_tokens = anthropic_usage["output_tokens"]
 
         self._send_sse("message_start", {
             "type": "message_start",
@@ -1184,8 +1230,12 @@ class AnthropicToOllamaHandler(http.server.BaseHTTPRequestHandler):
                 "id": msg_id, "type": "message", "role": "assistant",
                 "content": [], "model": model,
                 "stop_reason": None, "stop_sequence": None,
-                "usage": {"input_tokens": input_tokens, "output_tokens": 0,
-                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                "usage": {
+                    "input_tokens": anthropic_usage["input_tokens"],
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": anthropic_usage["cache_read_input_tokens"],
+                },
             },
         })
 

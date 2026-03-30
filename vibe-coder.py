@@ -1354,6 +1354,59 @@ def _get_git_branch(path):
     return branch or None
 
 
+def _usage_int(usage, *path):
+    """Read a nested integer from a usage payload, returning None when absent."""
+    current = usage
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    if current is None:
+        return None
+    try:
+        return max(int(current), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_usage_for_telemetry(usage):
+    """Normalize backend usage into prompt/output/cache buckets without backend detection."""
+    if not isinstance(usage, dict):
+        usage = {}
+
+    cache_read_tokens = _usage_int(usage, "cache_read_tokens")
+    if cache_read_tokens is None:
+        cache_read_tokens = _usage_int(usage, "cache_read_input_tokens")
+    if cache_read_tokens is None:
+        cache_read_tokens = _usage_int(usage, "prompt_tokens_details", "cached_tokens")
+    if cache_read_tokens is None:
+        cache_read_tokens = _usage_int(usage, "input_tokens_details", "cached_tokens")
+    cache_read_tokens = cache_read_tokens or 0
+
+    prompt_tokens = _usage_int(usage, "prompt_tokens")
+    input_tokens = _usage_int(usage, "input_tokens")
+    if input_tokens is None:
+        input_tokens = max((prompt_tokens or 0) - cache_read_tokens, 0)
+
+    if prompt_tokens is None:
+        prompt_tokens = input_tokens + cache_read_tokens
+
+    completion_tokens = _usage_int(usage, "completion_tokens")
+    output_tokens = _usage_int(usage, "output_tokens")
+    if completion_tokens is None:
+        completion_tokens = output_tokens or 0
+    if output_tokens is None:
+        output_tokens = completion_tokens
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+    }
+
+
 class SessionTelemetry:
     """Persistable session telemetry state for downstream analysis."""
 
@@ -1454,14 +1507,10 @@ class SessionTelemetry:
         if self._current_turn is None:
             return
 
-        usage = usage or {}
-        self._current_turn["inputTokens"] += int(usage.get("prompt_tokens") or 0)
-        self._current_turn["outputTokens"] += int(usage.get("completion_tokens") or 0)
-        self._current_turn["cacheReadTokens"] += int(
-            usage.get("cache_read_tokens")
-            or usage.get("cache_read_input_tokens")
-            or 0
-        )
+        normalized_usage = _normalize_usage_for_telemetry(usage)
+        self._current_turn["inputTokens"] += normalized_usage["input_tokens"]
+        self._current_turn["outputTokens"] += normalized_usage["output_tokens"]
+        self._current_turn["cacheReadTokens"] += normalized_usage["cache_read_tokens"]
         self.updated_at = _utcnow_iso()
 
     def record_tool_call(self, tool_call_id, tool_name, started_at=None, ended_at=None, is_error=False):
@@ -5282,14 +5331,15 @@ class Agent:
 
                 # Reconcile token estimate with actual usage from API
                 # Skip reconciliation right after compaction to avoid drift
+                normalized_usage = _normalize_usage_for_telemetry(usage)
                 if isinstance(response, dict) and not self.session._just_compacted:
-                    if usage.get("prompt_tokens", 0) > 0:
+                    if normalized_usage["prompt_tokens"] > 0:
                         self.session._token_estimate = (
-                            usage["prompt_tokens"] + usage.get("completion_tokens", 0)
+                            normalized_usage["prompt_tokens"] + normalized_usage["completion_tokens"]
                         )
                     # Show per-turn token usage (subtle, always visible)
-                    prompt_t = usage.get("prompt_tokens", 0)
-                    completion_t = usage.get("completion_tokens", 0)
+                    prompt_t = normalized_usage["prompt_tokens"]
+                    completion_t = normalized_usage["completion_tokens"]
                     if (prompt_t or completion_t) and not self.config.quiet:
                         pct = min(int(((prompt_t + completion_t) / self.config.context_window) * 100), 100)
                         print(f"  {_ansi(chr(27)+'[38;5;240m')}tokens: {prompt_t}→{completion_t} "

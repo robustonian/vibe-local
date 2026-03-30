@@ -94,6 +94,12 @@ vibe-local --model qwen3:8b
 - token usage
 - turn / session duration
 
+token usage は backend が cache-hit 情報を usage payload に含める場合、
+`input_tokens` (非キャッシュ) と `cache_read_tokens` を分離して保存します。
+たとえば `llama.cpp` の `prompt_tokens_details.cached_tokens` は cache read として取り込みます。
+一方でその情報が無い backend（例: 通常の Ollama 互換レスポンス）では、
+後方互換のため `cache_read_tokens = 0` として扱い、観測できた prompt/input tokens をそのまま保存します。
+
 ### 対応環境
 
 | 環境 | メモリ | メインモデル | サイドカー | 備考 |
