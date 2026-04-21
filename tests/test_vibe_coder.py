@@ -1334,6 +1334,107 @@ class TestOllamaClient:
         assert ok is True
         assert models == ["preview/Kimi-K2.5"]
 
+    def test_check_connection_openai_falls_back_to_chat_probe_when_models_unsupported(self):
+        client = self._make_client_for_host("https://api.example.com/v1")
+        client.default_model = "kimi-k2.6"
+        import urllib.error
+
+        def fake_urlopen(req, timeout=0):
+            if req.full_url == "https://api.example.com/api/tags":
+                raise Exception("not ollama")
+            if req.full_url == "https://api.example.com/v1/models":
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    404,
+                    "Not Found",
+                    hdrs=None,
+                    fp=mock.MagicMock(read=mock.MagicMock(return_value=b"<!DOCTYPE html><html>missing</html>")),
+                )
+            if req.full_url == "https://api.example.com/v1/chat/completions":
+                resp = mock.MagicMock()
+                resp.read.return_value = json.dumps({
+                    "choices": [{"message": {"content": "ok"}}]
+                }).encode()
+                return resp
+            raise AssertionError(req.full_url)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, models = client.check_connection()
+
+        assert ok is True
+        assert models == []
+        assert client.last_connection_error() == {"kind": None, "detail": ""}
+
+    def test_check_connection_openai_reports_auth_error_from_chat_probe(self):
+        client = self._make_client_for_host("https://api.example.com/v1")
+        client.default_model = "kimi-k2.6"
+        import urllib.error
+
+        def fake_urlopen(req, timeout=0):
+            if req.full_url == "https://api.example.com/api/tags":
+                raise Exception("not ollama")
+            if req.full_url == "https://api.example.com/v1/models":
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    404,
+                    "Not Found",
+                    hdrs=None,
+                    fp=mock.MagicMock(read=mock.MagicMock(return_value=b"<!DOCTYPE html><html>missing</html>")),
+                )
+            if req.full_url == "https://api.example.com/v1/chat/completions":
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    401,
+                    "Unauthorized",
+                    hdrs=None,
+                    fp=mock.MagicMock(read=mock.MagicMock(
+                        return_value=b'{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}'
+                    )),
+                )
+            raise AssertionError(req.full_url)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, models = client.check_connection()
+
+        assert ok is False
+        assert models == []
+        assert client.last_connection_error()["kind"] == "auth"
+        assert "Missing API key" in client.last_connection_error()["detail"]
+
+    def test_check_connection_openai_reports_access_denied_from_chat_probe(self):
+        client = self._make_client_for_host("https://api.example.com/v1")
+        client.default_model = "kimi-k2.6"
+        import urllib.error
+
+        def fake_urlopen(req, timeout=0):
+            if req.full_url == "https://api.example.com/api/tags":
+                raise Exception("not ollama")
+            if req.full_url == "https://api.example.com/v1/models":
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    404,
+                    "Not Found",
+                    hdrs=None,
+                    fp=mock.MagicMock(read=mock.MagicMock(return_value=b"<!DOCTYPE html><html>missing</html>")),
+                )
+            if req.full_url == "https://api.example.com/v1/chat/completions":
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    403,
+                    "Forbidden",
+                    hdrs=None,
+                    fp=mock.MagicMock(read=mock.MagicMock(return_value=b"error code: 1010")),
+                )
+            raise AssertionError(req.full_url)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, models = client.check_connection()
+
+        assert ok is False
+        assert models == []
+        assert client.last_connection_error()["kind"] == "access"
+        assert "1010" in client.last_connection_error()["detail"]
+
     def test_check_model_found(self):
         client = self._make_client()
         mock_resp = mock.MagicMock()
