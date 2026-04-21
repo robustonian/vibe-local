@@ -319,6 +319,27 @@ class TestConfig:
         # 512GB: 671B skipped (768), 405B not installed, 235B not installed,
         # 70B needs 96 → fits!
         assert cfg.model == "llama3.3:70b"
+
+    def test_query_installed_models_uses_custom_user_agent(self):
+        cfg = vc.Config()
+        cfg.ollama_host = "https://api.example.com/v1"
+
+        def fake_urlopen(req, timeout=0):
+            assert req.headers.get("User-agent") == f"vibe-local/{vc.__version__}"
+            if req.full_url == "https://api.example.com/api/tags":
+                raise Exception("not ollama")
+            if req.full_url == "https://api.example.com/v1/models":
+                resp = mock.MagicMock()
+                resp.read.return_value = json.dumps({
+                    "data": [{"id": "kimi-k2.6"}]
+                }).encode()
+                return resp
+            raise AssertionError(req.full_url)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            models = cfg._query_installed_models()
+
+        assert models == ["kimi-k2.6"]
         assert cfg.model != "deepseek-r1:671b"
 
     def test_get_model_tier(self):
@@ -1276,6 +1297,11 @@ class TestOllamaClient:
         cfg.debug = False
         return vc.OllamaClient(cfg)
 
+    def test_make_headers_include_custom_user_agent(self):
+        client = self._make_client()
+        headers = client._make_headers()
+        assert headers["User-Agent"] == f"vibe-local/{vc.__version__}"
+
     def test_check_connection_error_handling(self):
         client = self._make_client()
         with mock.patch("urllib.request.urlopen", side_effect=Exception("connection refused")):
@@ -1343,6 +1369,7 @@ class TestOllamaClient:
             if req.full_url == "https://api.example.com/api/tags":
                 raise Exception("not ollama")
             if req.full_url == "https://api.example.com/v1/models":
+                assert req.headers.get("User-agent") == f"vibe-local/{vc.__version__}"
                 raise urllib.error.HTTPError(
                     req.full_url,
                     404,
@@ -1351,6 +1378,7 @@ class TestOllamaClient:
                     fp=mock.MagicMock(read=mock.MagicMock(return_value=b"<!DOCTYPE html><html>missing</html>")),
                 )
             if req.full_url == "https://api.example.com/v1/chat/completions":
+                assert req.headers.get("User-agent") == f"vibe-local/{vc.__version__}"
                 resp = mock.MagicMock()
                 resp.read.return_value = json.dumps({
                     "choices": [{"message": {"content": "ok"}}]

@@ -568,7 +568,10 @@ class Config:
     def _query_installed_models(self):
         """Query API for installed model names. Returns list or empty.
         Tries Ollama /api/tags first, falls back to OpenAI-compatible /v1/models."""
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"vibe-local/{__version__}",
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         # Try Ollama /api/tags first
@@ -948,7 +951,10 @@ class OllamaClient:
 
     def _make_headers(self):
         """Build HTTP headers, including Authorization if api_key is set."""
-        h = {"Content-Type": "application/json"}
+        h = {
+            "Content-Type": "application/json",
+            "User-Agent": f"vibe-local/{__version__}",
+        }
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
