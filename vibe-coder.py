@@ -940,9 +940,11 @@ class OllamaClient:
         self.max_tokens = config.max_tokens
         self.temperature = config.temperature
         self.context_window = config.context_window
+        self.default_model = config.model
         self.debug = config.debug
         self.timeout = 300
         self._ollama_detected = None  # None=unchecked, True/False=cached
+        self._last_connection_error = None
 
     def _make_headers(self):
         """Build HTTP headers, including Authorization if api_key is set."""
@@ -950,6 +952,148 @@ class OllamaClient:
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
+
+    def _clear_connection_error(self):
+        self._last_connection_error = None
+
+    def _set_connection_error(self, kind, detail=""):
+        self._last_connection_error = {"kind": kind, "detail": detail.strip()}
+
+    def last_connection_error(self):
+        """Return details about the last startup probe failure, if any."""
+        if self._last_connection_error is None:
+            return {"kind": None, "detail": ""}
+        return dict(self._last_connection_error)
+
+    def _read_http_error_body(self, err, limit=500):
+        try:
+            body = err.read().decode("utf-8", errors="replace")[:limit]
+        except Exception:
+            body = ""
+        finally:
+            try:
+                err.close()
+            except Exception:
+                pass
+        return body
+
+    def _error_detail(self, body, fallback=""):
+        text = (body or "").strip()
+        if not text:
+            return fallback
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                message = err.get("message") or err.get("type")
+                if message:
+                    return str(message)
+            message = payload.get("message")
+            if isinstance(message, str) and message:
+                return message
+        return text
+
+    def _looks_like_html(self, text):
+        sample = (text or "").lstrip().lower()
+        return sample.startswith("<!doctype html") or sample.startswith("<html")
+
+    def _is_auth_failure(self, code, detail):
+        if code == 401:
+            return True
+        if code != 403:
+            return False
+        lowered = (detail or "").lower()
+        return any(token in lowered for token in (
+            "api key", "auth", "unauthorized", "forbidden", "permission", "token"
+        ))
+
+    def _probe_openai_chat_endpoint(self):
+        """Check whether /chat/completions is reachable even when /models is unsupported."""
+        payload = {
+            "model": self.default_model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "stream": False,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.api_base_url}/chat/completions",
+            data=body,
+            headers=self._make_headers(),
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+            resp.close()
+            self._clear_connection_error()
+            return True
+        except urllib.error.HTTPError as e:
+            error_body = self._read_http_error_body(e)
+            detail = self._error_detail(error_body, e.reason)
+            if self._is_auth_failure(e.code, detail):
+                self._set_connection_error("auth", detail)
+                return False
+            if e.code == 403:
+                self._set_connection_error("access", detail)
+                return False
+            if e.code == 429:
+                self._set_connection_error("rate_limit", detail)
+                return False
+            if e.code == 404 and self._looks_like_html(error_body):
+                self._set_connection_error("endpoint", detail or e.reason)
+                return False
+            # The endpoint answered the chat route, so treat it as reachable even if
+            # this lightweight probe was rejected (e.g. unknown model or validation).
+            self._clear_connection_error()
+            return True
+        except (ConnectionError, OSError, urllib.error.URLError) as e:
+            self._set_connection_error("network", str(e))
+            return False
+        except Exception as e:
+            self._set_connection_error("network", str(e))
+            return False
+
+    def _check_openai_connection(self):
+        req = urllib.request.Request(
+            f"{self.api_base_url}/models",
+            headers=self._make_headers(),
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+            try:
+                data = json.loads(resp.read(10 * 1024 * 1024))
+            finally:
+                resp.close()
+            self._clear_connection_error()
+            return True, [m.get("id", "").strip() for m in data.get("data", []) if m.get("id")]
+        except urllib.error.HTTPError as e:
+            error_body = self._read_http_error_body(e)
+            detail = self._error_detail(error_body, e.reason)
+            if self._is_auth_failure(e.code, detail):
+                self._set_connection_error("auth", detail)
+                return False, []
+            if e.code == 403:
+                self._set_connection_error("access", detail)
+                return False, []
+            if e.code == 429:
+                self._set_connection_error("rate_limit", detail)
+                return False, []
+            if 400 <= e.code < 500:
+                if self._probe_openai_chat_endpoint():
+                    return True, []
+                return False, []
+            self._set_connection_error("http", detail or e.reason)
+            return False, []
+        except (ConnectionError, OSError, urllib.error.URLError) as e:
+            self._set_connection_error("network", str(e))
+            return False, []
+        except Exception as e:
+            self._set_connection_error("network", str(e))
+            return False, []
 
     def _is_ollama(self):
         """Return True if the backend responds to /api/tags (i.e. is Ollama). Cached."""
@@ -994,7 +1138,8 @@ class OllamaClient:
 
     def check_connection(self, retries=3):
         """Check if backend is reachable. Returns (ok, model_list).
-        Tries Ollama /api/tags first, falls back to OpenAI-compatible /v1/models."""
+        Tries Ollama /api/tags first, then OpenAI-compatible probes."""
+        self._clear_connection_error()
         if self._is_ollama():
             url = f"{self.root_url}/api/tags"
             for attempt in range(retries):
@@ -1006,31 +1151,27 @@ class OllamaClient:
                     finally:
                         resp.close()
                     models = [m["name"] for m in data.get("models", [])]
+                    self._clear_connection_error()
                     return True, models
-                except Exception:
+                except Exception as e:
+                    self._set_connection_error("network", str(e))
                     if attempt < retries - 1:
                         time.sleep(1)
                         continue
                     return False, []
-        # Fallback: OpenAI-compatible /v1/models
+        # Fallback: OpenAI-compatible endpoint. Some providers do not expose /v1/models,
+        # so use it for discovery first and then fall back to a direct chat probe.
         for attempt in range(retries):
-            try:
-                req = urllib.request.Request(
-                    f"{self.api_base_url}/models",
-                    headers=self._make_headers(),
-                )
-                resp = urllib.request.urlopen(req, timeout=5)
-                try:
-                    data = json.loads(resp.read(10 * 1024 * 1024))
-                finally:
-                    resp.close()
-                models = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+            ok, models = self._check_openai_connection()
+            if ok:
                 return True, models
-            except Exception:
-                if attempt < retries - 1:
-                    time.sleep(1)
-                    continue
+            last_error = self.last_connection_error().get("kind")
+            if last_error in ("auth", "access", "endpoint", "rate_limit"):
                 return False, []
+            if attempt < retries - 1:
+                time.sleep(1)
+                continue
+            return False, []
 
     def check_model(self, model_name, available_models=None):
         """Check if a specific model is available (exact or tag match).
@@ -5747,6 +5888,37 @@ def main():
                 sys.exit(1)
         else:
             parsed = urllib.parse.urlparse(client.api_base_url)
+            conn_error = client.last_connection_error()
+            conn_kind = conn_error.get("kind")
+            conn_detail = conn_error.get("detail")
+            if conn_kind == "auth":
+                print(f"\n{C.RED}Authentication failed for the configured API endpoint.{C.RESET}")
+                print(f"{C.DIM}Endpoint: {config.ollama_host}{C.RESET}")
+                if conn_detail:
+                    print(f"{C.DIM}{conn_detail}{C.RESET}")
+                print(f"{C.DIM}Set API_KEY (or VIBE_LOCAL_API_KEY) for this backend, then try again.{C.RESET}")
+                sys.exit(1)
+            if conn_kind == "rate_limit":
+                print(f"\n{C.RED}The configured API endpoint rejected the startup probe due to rate limiting.{C.RESET}")
+                print(f"{C.DIM}Endpoint: {config.ollama_host}{C.RESET}")
+                if conn_detail:
+                    print(f"{C.DIM}{conn_detail}{C.RESET}")
+                print(f"{C.DIM}Wait and try again, or switch to a backend with available quota.{C.RESET}")
+                sys.exit(1)
+            if conn_kind == "access":
+                print(f"\n{C.RED}The configured API endpoint denied access to the startup probe.{C.RESET}")
+                print(f"{C.DIM}Endpoint: {config.ollama_host}{C.RESET}")
+                if conn_detail:
+                    print(f"{C.DIM}{conn_detail}{C.RESET}")
+                print(f"{C.DIM}Check API_KEY, endpoint allow-lists, and any provider-side firewall or bot protection.{C.RESET}")
+                sys.exit(1)
+            if conn_kind == "endpoint":
+                print(f"\n{C.RED}The configured API endpoint does not expose /v1/chat/completions here.{C.RESET}")
+                print(f"{C.DIM}Endpoint: {config.ollama_host}{C.RESET}")
+                if conn_detail:
+                    print(f"{C.DIM}{conn_detail}{C.RESET}")
+                print(f"{C.DIM}Check OLLAMA_HOST and make sure it points at the backend's OpenAI-compatible API base.{C.RESET}")
+                sys.exit(1)
             print(f"\n{C.RED}Cannot connect to the configured API endpoint.{C.RESET}")
             print(f"{C.DIM}Endpoint: {config.ollama_host}{C.RESET}")
             if _is_local_hostname(parsed.hostname):

@@ -318,6 +318,17 @@ OLLAMA_HOST=https://api.example.com
 OLLAMA_HOST=https://api.example.com/v1
 ```
 
+Some OpenAI-compatible providers do not implement `GET /v1/models`.
+`vibe-local` falls back to probing `POST /v1/chat/completions` in that case, so a missing model-list route is no longer treated as a dead endpoint.
+
+**"authentication failed for the configured API endpoint"**
+
+Set `API_KEY` (or `VIBE_LOCAL_API_KEY`) for that backend, then retry.
+
+**"the configured API endpoint denied access to the startup probe"**
+
+The endpoint is reachable, but the provider rejected the probe. Check API key permissions, provider allow-lists, and any firewall / bot-protection settings on the service.
+
 **"model not found"**
 ```bash
 ollama pull qwen3:8b
@@ -660,6 +671,7 @@ vibe-local works with any OpenAI-compatible API endpoint:
 
 > When using non-Ollama backends, set `MODEL` explicitly (auto-detection requires Ollama).
 > Ollama-specific features (`ollama pull`, model auto-detect) are skipped automatically.
+> Some compatible providers do not expose `/v1/models`; vibe-local falls back to a direct `/v1/chat/completions` probe during startup and skips model-list validation when the provider does not report models.
 
 ### Model Tiers
 
