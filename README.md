@@ -672,6 +672,7 @@ vibe-local works with any OpenAI-compatible API endpoint:
 > When using non-Ollama backends, set `MODEL` explicitly (auto-detection requires Ollama).
 > Ollama-specific features (`ollama pull`, model auto-detect) are skipped automatically.
 > Some compatible providers do not expose `/v1/models`; vibe-local falls back to a direct `/v1/chat/completions` probe during startup and skips model-list validation when the provider does not report models.
+> vibe-local also sends its own `User-Agent` header instead of Python's default `Python-urllib/...`, which avoids provider/WAF blocks seen on some hosted endpoints.
 
 ### Model Tiers
 
